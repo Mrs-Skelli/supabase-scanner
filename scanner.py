@@ -13,6 +13,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from ssrf_guard import validate_url
+
 logger = logging.getLogger(__name__)
 
 # --- Patterns ---
@@ -108,14 +110,37 @@ class ScanResult:
         return [t for t in self.tables_checked if t.rls_likely_disabled]
 
 
-async def _fetch(client: httpx.AsyncClient, url: str) -> str | None:
+async def _fetch(client: httpx.AsyncClient, url: str, *, _ssrf_check: bool = True) -> str | None:
+    if _ssrf_check:
+        err = validate_url(url)
+        if err:
+            logger.warning("SSRF blocked: %s (%s)", url, err)
+            return None
     try:
-        resp = await client.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT,
-                                follow_redirects=True)
-        if resp.status_code in (200, 206):
-            if len(resp.content) > MAX_JS_SIZE:
-                return None
-            return resp.text
+        # Manual redirect following with SSRF validation on each hop
+        max_redirects = 5
+        current_url = url
+        for _ in range(max_redirects):
+            resp = await client.get(current_url, headers=HEADERS, timeout=REQUEST_TIMEOUT,
+                                    follow_redirects=False)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("location")
+                if not location:
+                    return None
+                from urllib.parse import urljoin as _urljoin
+                current_url = _urljoin(current_url, location)
+                err = validate_url(current_url)
+                if err:
+                    logger.warning("SSRF blocked redirect: %s (%s)", current_url, err)
+                    return None
+                continue
+            if resp.status_code in (200, 206):
+                if len(resp.content) > MAX_JS_SIZE:
+                    return None
+                return resp.text
+            return None
+        logger.debug("Too many redirects for %s", url)
+        return None
     except Exception as exc:
         logger.debug("Failed to fetch %s: %s", url, exc)
     return None
@@ -397,6 +422,12 @@ async def scan(target_url: str, auth_token: str | None = None, refresh_token: st
     if not parsed.scheme:
         target_url = "https://" + target_url
         result.target_url = target_url
+
+    # SSRF guard: validate target URL before any server-side requests
+    url_err = validate_url(target_url)
+    if url_err:
+        result.error = f"Blocked: {url_err}"
+        return result
 
     async with httpx.AsyncClient(verify=True) as client:
         html = await _fetch(client, target_url)
