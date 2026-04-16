@@ -6,7 +6,6 @@ Mounted under /supabase via Apache reverse proxy.
 import asyncio
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -58,6 +57,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 class ScanRequest(BaseModel):
+    auth_token: str | None = None  # Optional JWT for authenticated RLS testing
     url: str
 
     @field_validator("url")
@@ -91,6 +91,7 @@ class ScanResponse(BaseModel):
     credentials: list[CredentialResponse]
     tables_checked: list[TableResponse]
     vulnerable_table_count: int
+    auth_mode: str
     error: str | None
 
 
@@ -124,6 +125,7 @@ def _serialize_result(result: ScanResult) -> ScanResponse:
         credentials=creds,
         tables_checked=tables,
         vulnerable_table_count=len(result.vulnerable_tables),
+        auth_mode=result.auth_mode,
         error=result.error,
     )
 
@@ -143,7 +145,7 @@ async def api_scan(request: Request, body: ScanRequest):
     """
     logger.info("Scan requested for: %s (from %s)", body.url, get_remote_address(request))
     try:
-        result = await asyncio.wait_for(scan(body.url), timeout=60)
+        result = await asyncio.wait_for(scan(body.url, auth_token=body.auth_token), timeout=60)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Scan timed out after 60 seconds")
     except Exception as exc:

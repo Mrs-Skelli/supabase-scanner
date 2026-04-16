@@ -13,7 +13,6 @@
   --terminal-black: #000;
   --terminal-dark: #111;
   --terminal-gray: #333;
-  --terminal-header: #222;
   --terminal-text: #c8e1ff;
   --terminal-cursor: #39a5ff;
   --terminal-red: #ff5f57;
@@ -37,13 +36,24 @@ h1{color:var(--terminal-bright-blue);font-size:1.8em;margin-bottom:5px}
 .subtitle{color:var(--terminal-dim-blue);margin-bottom:20px;font-size:.9em}
 .terminal-prompt{color:var(--terminal-bright-blue);margin-bottom:5px;margin-top:15px;font-weight:bold}
 .terminal-prompt::before{content:"$ ";color:var(--terminal-bright-blue)}
-.scan-row{display:flex;gap:8px;margin-bottom:20px}
-input[type=text]{flex:1;padding:8px 12px;border:1px solid var(--terminal-blue);background:var(--terminal-dark);color:var(--terminal-text);font-family:'Courier New',monospace;font-size:1rem;outline:none;border-radius:0}
-input[type=text]:focus{border-color:var(--terminal-bright-blue);box-shadow:0 0 5px var(--terminal-dim-blue)}
-input[type=text]::placeholder{color:var(--terminal-dim-blue)}
+.scan-row{display:flex;gap:8px;margin-bottom:8px}
+input[type=text],textarea{flex:1;padding:8px 12px;border:1px solid var(--terminal-blue);background:var(--terminal-dark);color:var(--terminal-text);font-family:'Courier New',monospace;font-size:1rem;outline:none;border-radius:0}
+input[type=text]:focus,textarea:focus{border-color:var(--terminal-bright-blue);box-shadow:0 0 5px var(--terminal-dim-blue)}
+input[type=text]::placeholder,textarea::placeholder{color:var(--terminal-dim-blue)}
+textarea{resize:vertical;min-height:38px;font-size:.85rem}
 button{padding:8px 16px;background:var(--terminal-black);color:var(--terminal-blue);border:1px solid var(--terminal-blue);font-family:'Courier New',monospace;cursor:pointer;text-transform:uppercase;font-weight:bold;font-size:.9rem;transition:all .3s ease}
 button:hover{background:var(--terminal-blue);color:var(--terminal-black)}
 button:disabled{opacity:.4;cursor:not-allowed}
+.toggle-btn{padding:4px 10px;font-size:.75rem;margin-bottom:12px;border-color:var(--terminal-dim-blue);color:var(--terminal-dim-blue)}
+.toggle-btn:hover{border-color:var(--terminal-bright-blue);color:var(--terminal-bright-blue);background:transparent}
+.toggle-btn.active{border-color:var(--terminal-yellow);color:var(--terminal-yellow)}
+.auth-section{display:none;margin-bottom:12px}
+.auth-section.visible{display:block}
+.auth-label{color:var(--terminal-dim-blue);font-size:.8rem;margin-bottom:4px}
+.auth-hint{color:var(--terminal-dim-blue);font-size:.75rem;margin-top:2px;font-style:italic}
+.mode-badge{display:inline-block;padding:2px 8px;font-size:.75rem;font-weight:bold;font-family:'Courier New',monospace;margin-left:8px}
+.mode-badge.anon{color:var(--terminal-dim-blue);border:1px solid var(--terminal-dim-blue)}
+.mode-badge.auth{color:var(--terminal-yellow);border:1px solid var(--terminal-yellow)}
 .result-block{background:var(--terminal-black);border:1px solid var(--terminal-blue);box-shadow:0 0 10px var(--terminal-dim-blue);padding:15px;margin-bottom:15px}
 .result-block h2{color:var(--terminal-bright-blue);font-size:1.2em;margin-bottom:10px;font-family:'Courier New',monospace}
 .stat{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--terminal-dim-blue)}
@@ -94,6 +104,12 @@ a:hover{background:var(--terminal-gray)}
         <input type="text" id="url" placeholder="https://target.com" autofocus>
         <button id="scanBtn" onclick="doScan()">[SCAN]</button>
       </div>
+      <button class="toggle-btn" id="authToggle" onclick="toggleAuth()">[+ AUTH TOKEN]</button>
+      <div class="auth-section" id="authSection">
+        <div class="auth-label">> --auth-token (optional JWT for authenticated scanning)</div>
+        <textarea id="authToken" rows="2" placeholder="eyJhbGciOiJIUzI1NiIs..."></textarea>
+        <div class="auth-hint">Paste a user session JWT to test RLS as an authenticated user instead of anon</div>
+      </div>
       <div id="status"></div>
       <div id="results"></div>
 
@@ -102,14 +118,24 @@ a:hover{background:var(--terminal-gray)}
   </div>
 </div>
 <script>
-const urlInput=document.getElementById('url'),btn=document.getElementById('scanBtn'),status=document.getElementById('status'),results=document.getElementById('results');
+const urlInput=document.getElementById('url'),btn=document.getElementById('scanBtn'),status=document.getElementById('status'),results=document.getElementById('results'),authToken=document.getElementById('authToken'),authSection=document.getElementById('authSection'),authToggle=document.getElementById('authToggle');
 urlInput.addEventListener('keydown',e=>{if(e.key==='Enter')doScan()});
+function toggleAuth(){
+  const vis=authSection.classList.toggle('visible');
+  authToggle.textContent=vis?'[- AUTH TOKEN]':'[+ AUTH TOKEN]';
+  authToggle.classList.toggle('active',vis);
+  if(!vis)authToken.value='';
+}
 async function doScan(){
   const url=urlInput.value.trim();if(!url)return;
+  const token=authToken.value.trim()||null;
   btn.disabled=true;results.innerHTML='';
-  status.innerHTML='<span class="spinner"></span> [scanning] target analysis in progress...';
+  const mode=token?'authenticated':'anon';
+  status.innerHTML=`<span class="spinner"></span> [scanning${token?' +auth':''}] target analysis in progress...`;
   try{
-    const r=await fetch('api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const body={url};
+    if(token)body.auth_token=token;
+    const r=await fetch('api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const d=await r.json();
     if(!r.ok){status.textContent='';results.innerHTML=`<div class="error-box">[ERROR] ${d.detail||'Scan failed'}</div>`;return}
     status.textContent='';render(d);
@@ -117,7 +143,9 @@ async function doScan(){
   finally{btn.disabled=false}
 }
 function render(d){
-  let h=`<div class="result-block"><h2>> scan_summary</h2>
+  const modeCls=d.auth_mode==='authenticated'?'auth':'anon';
+  const modeLabel=d.auth_mode==='authenticated'?'AUTHENTICATED':'ANON';
+  let h=`<div class="result-block"><h2>> scan_summary <span class="mode-badge ${modeCls}">${modeLabel}</span></h2>
     <div class="stat"><span class="label">target</span><span class="value">${esc(d.target_url)}</span></div>
     <div class="stat"><span class="label">credentials_found</span><span class="value ${d.found_credentials?'vuln':'safe'}">${d.found_credentials?'TRUE':'FALSE'}</span></div>
     <div class="stat"><span class="label">js_files_scanned</span><span class="value">${d.js_files_scanned}</span></div>
