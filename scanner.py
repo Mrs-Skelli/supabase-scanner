@@ -80,11 +80,13 @@ class Credential:
 
 @dataclass
 class TableResult:
+    """Result of checking a single table for RLS."""
     name: str
     row_count: int | None
     sample_columns: list[str] = field(default_factory=list)
     rls_likely_disabled: bool = False
     error: str | None = None
+    sample_data: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -95,6 +97,7 @@ class ScanResult:
     js_files_scanned: int = 0
     auth_mode: str = "anon"
     error: str | None = None
+    sample_data: list[dict] = field(default_factory=list)
 
     @property
     def found_credentials(self) -> bool:
@@ -202,6 +205,43 @@ async def _get_table_names_openapi(
     return None
 
 
+
+
+async def _get_table_names_graphql(
+    client: httpx.AsyncClient, cred: Credential, auth_token: str | None = None
+) -> list[str] | None:
+    """
+    Try GraphQL introspection at /graphql/v1.
+    Supabase exposes a GraphQL endpoint that often has introspection enabled.
+    Query type fields are named like employeesCollection — strip "Collection" suffix.
+    """
+    url = f"{cred.supabase_url}/graphql/v1"
+    headers = {
+        **_build_headers(cred, auth_token),
+        "Content-Type": "application/json",
+    }
+    query = '{"query":"{ __schema { queryType { fields { name } } } }"}'
+    try:
+        resp = await client.post(url, headers=headers, content=query, timeout=REQUEST_TIMEOUT)
+        if resp.status_code not in (200, 206):
+            return None
+        data = resp.json()
+        fields = data.get("data", {}).get("__schema", {}).get("queryType", {}).get("fields", [])
+        tables = []
+        for f in fields:
+            name = f.get("name", "")
+            # Supabase GraphQL names collections as "tableNameCollection"
+            if name.endswith("Collection"):
+                table = name[:-len("Collection")]
+                tables.append(table)
+        if tables:
+            logger.info("GraphQL introspection: %d tables for %s: %s",
+                        len(tables), cred.project_id, tables)
+            return tables
+    except Exception as exc:
+        logger.debug("GraphQL introspection failed for %s: %s", cred.project_id, exc)
+    return None
+
 async def _verify_tables_exist(
     client: httpx.AsyncClient, cred: Credential,
     candidates: list[str], auth_token: str | None = None,
@@ -218,7 +258,9 @@ async def _verify_tables_exist(
                     headers={**_build_headers(cred, auth_token), "Accept": "application/json"},
                     timeout=REQUEST_TIMEOUT,
                 )
-                if r.status_code != 404:
+                # Only 200/206 confirms a table exists
+                # 401/403 = can't tell (invalid key or RLS), 404 = doesn't exist
+                if r.status_code in (200, 206):
                     return name
             except Exception:
                 pass
@@ -243,14 +285,19 @@ async def _get_table_names(
     if openapi_tables:
         return openapi_tables
 
-    # Combine JS-extracted tables + common wordlist, deduplicated
+    # Try GraphQL introspection
+    graphql_tables = await _get_table_names_graphql(client, cred, auth_token)
+    if graphql_tables:
+        return graphql_tables
+
+    # Fallback: combine JS-extracted tables + common wordlist, deduplicated
     candidates = list(js_extracted_tables)
     # Add common names not already found in JS
     for name in COMMON_TABLE_NAMES:
         if name not in js_extracted_tables:
             candidates.append(name)
 
-    logger.info("OpenAPI locked for %s. Probing %d candidates (%d from JS, %d common)",
+    logger.info("OpenAPI + GraphQL locked for %s. Probing %d candidates (%d from JS, %d common)",
                 cred.project_id, len(candidates), len(js_extracted_tables),
                 len(candidates) - len(js_extracted_tables))
 
@@ -294,11 +341,13 @@ async def _check_table_rls(
                 return TableResult(
                     name=table, row_count=total,
                     sample_columns=sample_cols, rls_likely_disabled=True,
+                    sample_data=data if isinstance(data, list) else [],
                 )
             elif isinstance(data, list) and len(data) > 0:
                 return TableResult(
                     name=table, row_count=len(data),
                     sample_columns=sample_cols, rls_likely_disabled=True,
+                    sample_data=data,
                 )
             return TableResult(
                 name=table, row_count=0, rls_likely_disabled=False,
@@ -313,7 +362,32 @@ async def _check_table_rls(
         return TableResult(name=table, row_count=None, error=str(exc))
 
 
-async def scan(target_url: str, auth_token: str | None = None) -> ScanResult:
+
+
+async def _refresh_auth_token(
+    client: httpx.AsyncClient, cred: Credential, refresh_token: str
+) -> str | None:
+    """Use a Supabase refresh token to get a fresh access_token."""
+    url = f"{cred.supabase_url}/auth/v1/token?grant_type=refresh_token"
+    try:
+        resp = await client.post(
+            url,
+            headers={"apikey": cred.anon_key, "Content-Type": "application/json"},
+            json={"refresh_token": refresh_token},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code in (200, 206):
+            data = resp.json()
+            token = data.get("access_token")
+            if token:
+                logger.info("Refreshed auth token successfully")
+                return token
+        logger.debug("Token refresh failed: %s", resp.text[:200])
+    except Exception as exc:
+        logger.debug("Token refresh error: %s", exc)
+    return None
+
+async def scan(target_url: str, auth_token: str | None = None, refresh_token: str | None = None) -> ScanResult:
     result = ScanResult(
         target_url=target_url,
         auth_mode="authenticated" if auth_token else "anon",
@@ -363,6 +437,14 @@ async def scan(target_url: str, auth_token: str | None = None) -> ScanResult:
         if not result.credentials:
             return result
 
+        # If we have a refresh_token and credentials, try to get a fresh access_token
+        if refresh_token and result.credentials and auth_token:
+            cred = result.credentials[0]
+            fresh = await _refresh_auth_token(client, cred, refresh_token)
+            if fresh:
+                auth_token = fresh
+                logger.info("Using refreshed auth token for RLS checks")
+
         # Probe tables for each unique credential
         seen_projects: set[str] = set()
         for cred in result.credentials:
@@ -370,7 +452,8 @@ async def scan(target_url: str, auth_token: str | None = None) -> ScanResult:
                 continue
             seen_projects.add(cred.project_id)
 
-            tables = await _get_table_names(client, cred, js_tables, auth_token)
+            # Always use anon key for discovery; auth_token only for RLS check
+            tables = await _get_table_names(client, cred, js_tables, None)
             if not tables:
                 continue
 

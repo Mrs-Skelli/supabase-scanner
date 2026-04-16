@@ -177,9 +177,25 @@ function render(d){
       h+=`<td>${t.row_count??'—'}</td>`;
       h+=`<td><span class="badge ${hasRLS?'yes':'no'}">${hasRLS?'[YES]':'[NO]'}</span></td></tr>`;
       if(hasCols){
-        h+=`<tr class="columns-row" id="cols-${i}"><td colspan="3"><div class="col-list">`;
-        t.sample_columns.forEach(c=>{h+=`<span class="col-tag">${esc(c)}</span>`});
-        h+=`</div></td></tr>`;
+        h+=`<tr class="columns-row" id="cols-${i}"><td colspan="3">`;
+        if(t.sample_data&&t.sample_data.length>0){
+          h+=`<div style="margin-bottom:6px;color:var(--terminal-dim-blue);font-size:.75rem">> sample row (1 of ${t.row_count??'?'})</div>`;
+          t.sample_data.forEach(row=>{
+            h+=`<div style="display:grid;grid-template-columns:1fr 2fr;gap:2px;margin-bottom:4px">`;
+            Object.entries(row).forEach(([k,v])=>{
+              const val=v===null?'null':typeof v==='object'?JSON.stringify(v):String(v);
+              const truncated=val.length>80?val.slice(0,80)+'...':val;
+              h+=`<div style="color:var(--terminal-dim-blue);font-size:.75rem;padding:2px 4px;border-right:1px solid var(--terminal-gray)">${esc(k)}</div>`;
+              h+=`<div style="color:var(--terminal-text);font-size:.75rem;padding:2px 4px;word-break:break-all">${esc(truncated)}</div>`;
+            });
+            h+=`</div>`;
+          });
+        }else{
+          h+=`<div class="col-list">`;
+          t.sample_columns.forEach(c=>{h+=`<span class="col-tag">${esc(c)}</span>`});
+          h+=`</div>`;
+        }
+        h+=`</td></tr>`;
       }
     });
     h+=`</table></div>`;

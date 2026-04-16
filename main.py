@@ -57,8 +57,36 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 class ScanRequest(BaseModel):
+    _pending_refresh_token: str | None = None  # class-level temp storage
     auth_token: str | None = None  # Optional JWT for authenticated RLS testing
+    refresh_token: str | None = None  # Auto-extracted from cookie blobs
     url: str
+
+    @field_validator("auth_token", mode="before")
+    @classmethod
+    def clean_auth_token(cls, v):
+        if v is None or v == "":
+            return None
+        v = v.strip().replace("\n", "").replace("\r", "")
+        if v.lower().startswith("bearer "):
+            v = v[7:]
+        v = v.strip()
+        # Strip "base64-" prefix from Supabase cookie format
+        if v.startswith("base64-"):
+            v = v[7:]
+        # If it looks like a base64 blob (not a JWT), try to extract access_token
+        if v and not v.startswith("eyJ") and len(v) > 200:
+            import base64, json
+            try:
+                decoded = json.loads(base64.b64decode(v + "=="))
+                if "access_token" in decoded:
+                    # Store refresh_token for later use via _cookie_refresh_token class var
+                    if "refresh_token" in decoded:
+                        cls._pending_refresh_token = decoded["refresh_token"]
+                    v = decoded["access_token"]
+            except Exception:
+                pass
+        return v.strip() or None
 
     @field_validator("url")
     @classmethod
@@ -82,6 +110,7 @@ class TableResponse(BaseModel):
     sample_columns: list[str]
     rls_likely_disabled: bool
     error: str | None
+    sample_data: list[dict] = []
 
 
 class ScanResponse(BaseModel):
@@ -114,6 +143,7 @@ def _serialize_result(result: ScanResult) -> ScanResponse:
             sample_columns=t.sample_columns,
             rls_likely_disabled=t.rls_likely_disabled,
             error=t.error,
+            sample_data=t.sample_data,
         )
         for t in result.tables_checked
     ]
@@ -145,7 +175,9 @@ async def api_scan(request: Request, body: ScanRequest):
     """
     logger.info("Scan requested for: %s (from %s)", body.url, get_remote_address(request))
     try:
-        result = await asyncio.wait_for(scan(body.url, auth_token=body.auth_token), timeout=60)
+        # Use refresh_token extracted from cookie blob if available
+        refresh = body.refresh_token or getattr(body, '_pending_refresh_token', None)
+        result = await asyncio.wait_for(scan(body.url, auth_token=body.auth_token, refresh_token=refresh), timeout=60)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Scan timed out after 60 seconds")
     except Exception as exc:
