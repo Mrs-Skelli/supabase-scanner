@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000000">
+<title>Supabase RLS Scanner - Skelli Research</title>
+<style>
+:root {
+  --terminal-blue: #007acc;
+  --terminal-bright-blue: #39a5ff;
+  --terminal-dim-blue: #00477a;
+  --terminal-black: #000;
+  --terminal-dark: #111;
+  --terminal-gray: #333;
+  --terminal-header: #222;
+  --terminal-text: #c8e1ff;
+  --terminal-cursor: #39a5ff;
+  --terminal-red: #ff5f57;
+  --terminal-yellow: #febc2e;
+  --terminal-green: #28c840;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--terminal-black);color:var(--terminal-text);font-family:'Courier New',monospace;font-size:16px;line-height:1.6;letter-spacing:.3px}
+.mainbg{position:relative;min-height:100vh;padding:20px;display:flex;justify-content:center;align-items:flex-start;padding-top:50px}
+.mainbg::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;background:linear-gradient(rgba(18,16,16,0) 50%,rgba(0,0,0,.25) 50%);background-size:100% 4px;z-index:2;pointer-events:none;opacity:.15}
+.terminal-window{background:var(--terminal-black);border:1px solid #444;box-shadow:0 0 20px rgba(0,0,0,.7);width:100%;max-width:800px;overflow:hidden;border-radius:8px}
+.terminal-header{background:#2d2d2d;padding:8px 12px;display:flex;align-items:center;border-bottom:1px solid #333;position:relative}
+.terminal-controls{display:flex;gap:7px}
+.control{width:12px;height:12px;border-radius:50%;border:none}
+.control:nth-child(1){background:var(--terminal-red)}
+.control:nth-child(2){background:var(--terminal-yellow)}
+.control:nth-child(3){background:var(--terminal-green)}
+.terminal-title{color:#aaa;font-size:13px;text-align:center;width:100%;position:absolute;left:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+.terminal-content{padding:15px;min-height:400px}
+h1{color:var(--terminal-bright-blue);font-size:1.8em;margin-bottom:5px}
+.subtitle{color:var(--terminal-dim-blue);margin-bottom:20px;font-size:.9em}
+.terminal-prompt{color:var(--terminal-bright-blue);margin-bottom:5px;margin-top:15px;font-weight:bold}
+.terminal-prompt::before{content:"$ ";color:var(--terminal-bright-blue)}
+.scan-row{display:flex;gap:8px;margin-bottom:20px}
+input[type=text]{flex:1;padding:8px 12px;border:1px solid var(--terminal-blue);background:var(--terminal-dark);color:var(--terminal-text);font-family:'Courier New',monospace;font-size:1rem;outline:none;border-radius:0}
+input[type=text]:focus{border-color:var(--terminal-bright-blue);box-shadow:0 0 5px var(--terminal-dim-blue)}
+input[type=text]::placeholder{color:var(--terminal-dim-blue)}
+button{padding:8px 16px;background:var(--terminal-black);color:var(--terminal-blue);border:1px solid var(--terminal-blue);font-family:'Courier New',monospace;cursor:pointer;text-transform:uppercase;font-weight:bold;font-size:.9rem;transition:all .3s ease}
+button:hover{background:var(--terminal-blue);color:var(--terminal-black)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.result-block{background:var(--terminal-black);border:1px solid var(--terminal-blue);box-shadow:0 0 10px var(--terminal-dim-blue);padding:15px;margin-bottom:15px}
+.result-block h2{color:var(--terminal-bright-blue);font-size:1.2em;margin-bottom:10px;font-family:'Courier New',monospace}
+.stat{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--terminal-dim-blue)}
+.stat:last-child{border:none}
+.label{color:var(--terminal-dim-blue)}
+.value{font-weight:bold;color:var(--terminal-text)}
+.vuln{color:var(--terminal-red)}
+.safe{color:var(--terminal-green)}
+.warn{color:var(--terminal-yellow)}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--terminal-gray);font-size:.9rem}
+th{color:var(--terminal-dim-blue);font-weight:bold;text-transform:uppercase;font-size:.8rem}
+.badge{display:inline-block;padding:2px 8px;font-size:.8rem;font-weight:bold;font-family:'Courier New',monospace}
+.badge.yes{color:var(--terminal-red)}
+.badge.no{color:var(--terminal-green)}
+.error-box{border:1px solid var(--terminal-red);padding:12px;color:var(--terminal-red);background:rgba(255,95,87,.05)}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--terminal-bright-blue);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.cursor::after{content:"█";animation:blink 1s steps(1) infinite;color:var(--terminal-cursor);font-weight:normal}
+#status{color:var(--terminal-dim-blue);margin-bottom:10px}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:var(--terminal-black)}
+::-webkit-scrollbar-thumb{background:var(--terminal-blue)}
+::-webkit-scrollbar-thumb:hover{background:var(--terminal-bright-blue)}
+footer{color:var(--terminal-dim-blue);text-align:center;margin-top:20px;padding:10px 0;border-top:1px solid var(--terminal-blue);font-size:.85em}
+a{color:var(--terminal-bright-blue);text-decoration:underline;transition:all .2s}
+a:hover{background:var(--terminal-gray)}
+</style>
+</head>
+<body>
+<div class="mainbg">
+  <div class="terminal-window">
+    <div class="terminal-header">
+      <div class="terminal-controls">
+        <div class="control"></div>
+        <div class="control"></div>
+        <div class="control"></div>
+      </div>
+      <div class="terminal-title">skelli — supabase-rls-scanner</div>
+    </div>
+    <div class="terminal-content">
+      <h1 class="cursor">Supabase RLS Scanner</h1>
+      <p class="subtitle">> Check if a target's Supabase tables have Row Level Security enabled</p>
+
+      <div class="terminal-prompt">scan --target</div>
+      <div class="scan-row">
+        <input type="text" id="url" placeholder="https://target.com" autofocus>
+        <button id="scanBtn" onclick="doScan()">[SCAN]</button>
+      </div>
+      <div id="status"></div>
+      <div id="results"></div>
+
+      <footer>skelli.win research tools</footer>
+    </div>
+  </div>
+</div>
+<script>
+const urlInput=document.getElementById('url'),btn=document.getElementById('scanBtn'),status=document.getElementById('status'),results=document.getElementById('results');
+urlInput.addEventListener('keydown',e=>{if(e.key==='Enter')doScan()});
+async function doScan(){
+  const url=urlInput.value.trim();if(!url)return;
+  btn.disabled=true;results.innerHTML='';
+  status.innerHTML='<span class="spinner"></span> [scanning] target analysis in progress...';
+  try{
+    const r=await fetch('api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const d=await r.json();
+    if(!r.ok){status.textContent='';results.innerHTML=`<div class="error-box">[ERROR] ${d.detail||'Scan failed'}</div>`;return}
+    status.textContent='';render(d);
+  }catch(e){status.textContent='';results.innerHTML=`<div class="error-box">[ERROR] Network: ${e.message}</div>`}
+  finally{btn.disabled=false}
+}
+function render(d){
+  let h=`<div class="result-block"><h2>> scan_summary</h2>
+    <div class="stat"><span class="label">target</span><span class="value">${esc(d.target_url)}</span></div>
+    <div class="stat"><span class="label">credentials_found</span><span class="value ${d.found_credentials?'vuln':'safe'}">${d.found_credentials?'TRUE':'FALSE'}</span></div>
+    <div class="stat"><span class="label">js_files_scanned</span><span class="value">${d.js_files_scanned}</span></div>
+    <div class="stat"><span class="label">vulnerable_tables</span><span class="value ${d.vulnerable_table_count>0?'vuln':'safe'}">${d.vulnerable_table_count}</span></div>
+    ${d.error?`<div class="stat"><span class="label">error</span><span class="value warn">${esc(d.error)}</span></div>`:''}</div>`;
+  if(d.credentials.length){
+    h+=`<div class="result-block"><h2>> credentials [${d.credentials.length}]</h2><table><tr><th>project_id</th><th>anon_key</th><th>source</th></tr>`;
+    d.credentials.forEach(c=>{h+=`<tr><td>${esc(c.project_id)}</td><td style="font-size:.8rem">${esc(c.anon_key_preview)}</td><td>${esc(c.source_file)}</td></tr>`});
+    h+=`</table></div>`;
+  }
+  if(d.tables_checked.length){
+    h+=`<div class="result-block"><h2>> tables [${d.tables_checked.length}]</h2><table><tr><th>name</th><th>rows</th><th>rls_disabled</th></tr>`;
+    d.tables_checked.forEach(t=>{h+=`<tr><td>${esc(t.name)}</td><td>${t.row_count??'—'}</td><td><span class="badge ${t.rls_likely_disabled?'yes':'no'}">${t.rls_likely_disabled?'[YES]':'[NO]'}</span></td></tr>`});
+    h+=`</table></div>`;
+  }
+  if(!d.credentials.length&&!d.tables_checked.length&&!d.error){h+=`<div class="result-block"><p style="color:var(--terminal-dim-blue)">[INFO] No Supabase credentials found on this target.</p></div>`}
+  results.innerHTML=h;
+}
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+</script>
+</body>
+</html>

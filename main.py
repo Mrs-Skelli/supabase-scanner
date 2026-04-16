@@ -1,15 +1,17 @@
 """
 FastAPI backend for the Supabase RLS Scanner web interface.
+Mounted under /supabase via Apache reverse proxy.
 """
 
 import asyncio
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -51,7 +53,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files (the frontend)
+# Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -70,7 +72,7 @@ class ScanRequest(BaseModel):
 class CredentialResponse(BaseModel):
     supabase_url: str
     project_id: str
-    anon_key_preview: str  # Only show first/last chars for safety in UI
+    anon_key_preview: str
     source_file: str
 
 
@@ -96,7 +98,6 @@ def _serialize_result(result: ScanResult) -> ScanResponse:
     creds = []
     for c in result.credentials:
         key = c.anon_key
-        # Show first 20 and last 10 chars only
         preview = key[:20] + "..." + key[-10:] if len(key) > 32 else key
         creds.append(CredentialResponse(
             supabase_url=c.supabase_url,
