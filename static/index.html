@@ -67,14 +67,24 @@ table{width:100%;border-collapse:collapse;margin-top:8px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--terminal-gray);font-size:.9rem}
 th{color:var(--terminal-dim-blue);font-weight:bold;text-transform:uppercase;font-size:.8rem}
 .badge{display:inline-block;padding:2px 8px;font-size:.8rem;font-weight:bold;font-family:'Courier New',monospace}
-.badge.yes{color:var(--terminal-red)}
-.badge.no{color:var(--terminal-green)}
+.badge.yes{color:var(--terminal-green)}
+.badge.no{color:var(--terminal-red)}
 .error-box{border:1px solid var(--terminal-red);padding:12px;color:var(--terminal-red);background:rgba(255,95,87,.05)}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--terminal-bright-blue);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 .cursor::after{content:"█";animation:blink 1s steps(1) infinite;color:var(--terminal-cursor);font-weight:normal}
 #status{color:var(--terminal-dim-blue);margin-bottom:10px}
+.table-row{cursor:pointer;transition:background .15s}
+.table-row:hover{background:var(--terminal-dark)}
+.table-row.expanded{background:var(--terminal-dark)}
+.columns-row{display:none}
+.columns-row.visible{display:table-row}
+.columns-row td{padding:8px 12px;color:var(--terminal-dim-blue);font-size:.8rem;border-bottom:1px dashed var(--terminal-dim-blue)}
+.col-list{display:flex;flex-wrap:wrap;gap:6px}
+.col-tag{background:var(--terminal-gray);color:var(--terminal-bright-blue);padding:2px 8px;font-size:.75rem;border:1px solid var(--terminal-dim-blue)}
+.expand-icon{color:var(--terminal-dim-blue);font-size:.8rem;margin-right:4px;display:inline-block;transition:transform .2s}
+.expanded .expand-icon{transform:rotate(90deg)}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-track{background:var(--terminal-black)}
 ::-webkit-scrollbar-thumb{background:var(--terminal-blue)}
@@ -130,7 +140,6 @@ async function doScan(){
   const url=urlInput.value.trim();if(!url)return;
   const token=authToken.value.trim()||null;
   btn.disabled=true;results.innerHTML='';
-  const mode=token?'authenticated':'anon';
   status.innerHTML=`<span class="spinner"></span> [scanning${token?' +auth':''}] target analysis in progress...`;
   try{
     const body={url};
@@ -157,12 +166,33 @@ function render(d){
     h+=`</table></div>`;
   }
   if(d.tables_checked.length){
-    h+=`<div class="result-block"><h2>> tables [${d.tables_checked.length}]</h2><table><tr><th>name</th><th>rows</th><th>rls_disabled</th></tr>`;
-    d.tables_checked.forEach(t=>{h+=`<tr><td>${esc(t.name)}</td><td>${t.row_count??'—'}</td><td><span class="badge ${t.rls_likely_disabled?'yes':'no'}">${t.rls_likely_disabled?'[YES]':'[NO]'}</span></td></tr>`});
+    h+=`<div class="result-block"><h2>> tables [${d.tables_checked.length}]</h2><table><tr><th>name</th><th>rows</th><th>rls_enabled</th></tr>`;
+    d.tables_checked.forEach((t,i)=>{
+      const hasRLS=!t.rls_likely_disabled;
+      const hasCols=t.sample_columns&&t.sample_columns.length>0;
+      const clickable=hasCols?'table-row':'';
+      const onclick=hasCols?`onclick="toggleRow(${i})"`:'';
+      h+=`<tr class="${clickable}" id="row-${i}" ${onclick}>`;
+      h+=`<td>${hasCols?'<span class="expand-icon">▶</span>':''}${esc(t.name)}</td>`;
+      h+=`<td>${t.row_count??'—'}</td>`;
+      h+=`<td><span class="badge ${hasRLS?'yes':'no'}">${hasRLS?'[YES]':'[NO]'}</span></td></tr>`;
+      if(hasCols){
+        h+=`<tr class="columns-row" id="cols-${i}"><td colspan="3"><div class="col-list">`;
+        t.sample_columns.forEach(c=>{h+=`<span class="col-tag">${esc(c)}</span>`});
+        h+=`</div></td></tr>`;
+      }
+    });
     h+=`</table></div>`;
   }
   if(!d.credentials.length&&!d.tables_checked.length&&!d.error){h+=`<div class="result-block"><p style="color:var(--terminal-dim-blue)">[INFO] No Supabase credentials found on this target.</p></div>`}
   results.innerHTML=h;
+}
+function toggleRow(i){
+  const row=document.getElementById('row-'+i);
+  const cols=document.getElementById('cols-'+i);
+  if(!cols)return;
+  row.classList.toggle('expanded');
+  cols.classList.toggle('visible');
 }
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 </script>

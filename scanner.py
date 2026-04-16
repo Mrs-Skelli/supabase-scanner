@@ -109,7 +109,7 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> str | None:
     try:
         resp = await client.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT,
                                 follow_redirects=True)
-        if resp.status_code == 200:
+        if resp.status_code in (200, 206):
             if len(resp.content) > MAX_JS_SIZE:
                 return None
             return resp.text
@@ -187,7 +187,7 @@ async def _get_table_names_openapi(
     headers = {**_build_headers(cred, auth_token), "Accept": "application/json"}
     try:
         resp = await client.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        if resp.status_code == 200:
+        if resp.status_code in (200, 206):
             spec = resp.json()
             paths = spec.get("paths", {})
             tables = [
@@ -285,7 +285,7 @@ async def _check_table_rls(
     try:
         resp = await client.get(url, params=params, headers=headers,
                                 timeout=REQUEST_TIMEOUT)
-        if resp.status_code == 200:
+        if resp.status_code in (200, 206):
             data = resp.json()
             total = _parse_content_range(resp.headers.get("content-range"))
             sample_cols = list(data[0].keys()) if isinstance(data, list) and data else []
