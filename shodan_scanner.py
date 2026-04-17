@@ -20,7 +20,14 @@ from scanner import ScanResult, scan
 logger = logging.getLogger(__name__)
 
 # Shodan search query that finds pages referencing Supabase
-SHODAN_QUERY = 'http.html:"supabase.co"'
+# Multiple queries for maximum Supabase coverage
+SHODAN_QUERIES = [
+    'ssl.cert.subject.cn:"*.supabase.co"',       # Hosted Supabase (highest yield)
+    'ssl.cert.subject.cn:"*.supabase.in"',        # Alternative Supabase domain
+    'http.html:"supabase.co"',                    # Frontend JS references
+    'http.component:"PostgREST"',                 # Self-hosted PostgREST
+]
+SHODAN_QUERY = SHODAN_QUERIES[0]  # Default for CLI --query
 
 # Output directory for findings
 RESULTS_DIR = Path("results")
@@ -141,8 +148,20 @@ async def run_shodan_scan(
         logger.error("Shodan count failed: %s", exc)
         return
 
-    urls = list(_iter_shodan_targets(api, query, max_results))
-    logger.info("Collected %d URLs from Shodan", len(urls))
+    # Run all queries and deduplicate URLs
+    all_urls = []
+    seen = set()
+    queries = SHODAN_QUERIES if query == SHODAN_QUERIES[0] else [query]
+    for q in queries:
+        try:
+            for url in _iter_shodan_targets(api, q, max_results):
+                if url not in seen:
+                    seen.add(url)
+                    all_urls.append(url)
+        except Exception as exc:
+            logger.warning("Query failed '%s': %s", q, exc)
+    urls = all_urls[:max_results]
+    logger.info("Collected %d unique URLs from %d Shodan queries", len(urls), len(queries))
 
     scanned = 0
     found_creds = 0
