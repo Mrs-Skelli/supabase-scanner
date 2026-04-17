@@ -35,28 +35,44 @@ def _shodan_client() -> shodan.Shodan:
 
 def _iter_shodan_targets(api: shodan.Shodan, query: str, max_results: int):
     """
-    Yield (ip, port, hostnames) tuples from Shodan search results.
-    Uses the search_cursor for large result sets.
+    Yield URLs from Shodan search results.
+    Uses api.search() (free tier compatible, 100 results per page).
+    Falls back to search_cursor if available.
     """
     count = 0
     try:
-        for banner in api.search_cursor(query):
-            if count >= max_results:
+        # Free tier: use paginated search (100 results per page)
+        page = 1
+        while count < max_results:
+            try:
+                results = api.search(query, page=page)
+            except shodan.APIError as exc:
+                if page == 1:
+                    logger.error("Shodan search error: %s", exc)
                 break
-            ip = banner.get("ip_str", "")
-            port = banner.get("port", 443)
-            hostnames = banner.get("hostnames", [])
-            http_host = banner.get("http", {}).get("host", "")
 
-            # Prefer hostname over raw IP
-            host = http_host or (hostnames[0] if hostnames else ip)
-            scheme = "https" if port in (443, 8443) else "http"
-            url = f"{scheme}://{host}"
-            if port not in (80, 443, 8080, 8443):
-                url += f":{port}"
+            matches = results.get("matches", [])
+            if not matches:
+                break
 
-            yield url
-            count += 1
+            for banner in matches:
+                if count >= max_results:
+                    break
+                ip = banner.get("ip_str", "")
+                port = banner.get("port", 443)
+                hostnames = banner.get("hostnames", [])
+                http_host = banner.get("http", {}).get("host", "")
+
+                host = http_host or (hostnames[0] if hostnames else ip)
+                scheme = "https" if port in (443, 8443) else "http"
+                url = f"{scheme}://{host}"
+                if port not in (80, 443, 8080, 8443):
+                    url += f":{port}"
+
+                yield url
+                count += 1
+
+            page += 1
     except shodan.APIError as exc:
         logger.error("Shodan API error: %s", exc)
 
