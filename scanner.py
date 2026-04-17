@@ -190,6 +190,11 @@ def _find_credentials(text: str, source: str) -> list[Credential]:
         keys = set(ANON_KEY_RE.findall(text))
     for project_id in set(urls):
         supabase_url = f"https://{project_id}.supabase.co"
+        # Validate constructed URL to prevent SSRF via crafted project IDs
+        err = validate_url(supabase_url)
+        if err:
+            logger.warning("Blocked credential with unsafe URL: %s (%s)", supabase_url, err)
+            continue
         for key in keys:
             creds.append(Credential(
                 supabase_url=supabase_url, project_id=project_id,

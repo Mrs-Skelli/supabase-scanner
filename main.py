@@ -182,7 +182,7 @@ async def api_scan(request: Request, body: ScanRequest):
         raise HTTPException(status_code=504, detail="Scan timed out after 60 seconds")
     except Exception as exc:
         logger.exception("Scan error for %s", body.url)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal scan error")
 
     return _serialize_result(result)
 
