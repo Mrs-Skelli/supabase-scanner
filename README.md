@@ -2,7 +2,7 @@
 
 A security research tool that scans websites for exposed Supabase credentials and identifies tables with Row-Level Security (RLS) disabled.
 
-Built for responsible disclosure — find it, report it, get it fixed.
+Built for responsible disclosur. Find it, report it, get it fixed.
 
 ---
 
