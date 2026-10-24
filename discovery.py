@@ -43,6 +43,10 @@ class ShodanDiscoveryUnavailable(RuntimeError):
     """Raised when every Shodan query fails before returning candidates."""
 
 
+class DiscoveryProvidersUnavailable(RuntimeError):
+    """Raised when no enabled discovery provider can complete a refresh."""
+
+
 @dataclass
 class DiscoveryTarget:
     url: str
@@ -53,6 +57,30 @@ class DiscoveryTarget:
 
 
 _CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def _run_outcome(
+    *,
+    active_scan: bool,
+    candidate_count: int,
+    provider_status: dict[str, dict[str, Any]],
+) -> str:
+    """Summarize provider health without presenting failed refreshes as success."""
+    statuses = {item.get("status") for item in provider_status.values()}
+    has_errors = "error" in statuses
+    has_healthy_provider = "ok" in statuses
+
+    if candidate_count:
+        if has_errors:
+            return "partial"
+        return "completed" if active_scan else "discovered"
+    if has_healthy_provider:
+        return "partial" if has_errors else "empty"
+    if has_errors:
+        return "failed"
+    if statuses == {"disabled"}:
+        return "disabled"
+    return "empty"
 
 
 def _target_confidence(target: DiscoveryTarget) -> str:
@@ -350,14 +378,25 @@ async def run_discovery_scan(
             extra={"event": "candidates_collected", "candidates": len(target_list)},
         )
 
+        outcome = _run_outcome(
+            active_scan=active_scan,
+            candidate_count=candidate_count,
+            provider_status=provider_status,
+        )
+        if outcome in {"failed", "disabled"}:
+            raise DiscoveryProvidersUnavailable(
+                "no enabled discovery provider completed successfully"
+            )
+
         if not active_scan:
             for target in target_list:
                 _append_jsonl(inventory_output, _serialize_candidate(target))
-            persist_status("discovered")
+            persist_status(outcome)
             logger.info(
                 "Passive discovery completed",
                 extra={
                     "event": "passive_discovery_completed",
+                    "status": outcome,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                     "candidates": len(target_list),
                 },
@@ -388,13 +427,12 @@ async def run_discovery_scan(
                 },
             )
 
-        status = "completed" if target_list else "empty"
-        persist_status(status)
+        persist_status(outcome)
         logger.info(
             "Discovery run completed",
             extra={
                 "event": "discovery_completed",
-                "status": status,
+                "status": outcome,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                 "candidates": len(target_list),
                 "scanned": scanned,

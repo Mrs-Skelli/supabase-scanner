@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from discovery import DiscoveryTarget, discover_targets, run_discovery_scan
+from discovery import (
+    DiscoveryProvidersUnavailable,
+    DiscoveryTarget,
+    discover_targets,
+    run_discovery_scan,
+)
 from scanner import ScanResult, SensitiveKeyExposure
 
 
@@ -131,6 +136,33 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["status"], "discovered")
         self.assertEqual(status["candidates"], 1)
         self.assertEqual(status["scanned"], 0)
+
+    async def test_discovery_only_fails_when_every_provider_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_file = Path(temp_dir) / "discovery-status.json"
+            with (
+                patch(
+                    "discovery._discover_shodan",
+                    AsyncMock(side_effect=RuntimeError("provider unavailable")),
+                ),
+                patch("discovery.DISCOVERY_STATUS_FILE", status_file),
+            ):
+                with self.assertRaises(DiscoveryProvidersUnavailable):
+                    await run_discovery_scan(
+                        ["shodan"],
+                        max_per_source=1,
+                        batch_size=1,
+                        findings_output=Path(temp_dir) / "findings.jsonl",
+                        inventory_output=Path(temp_dir) / "inventory.jsonl",
+                        active_scan=False,
+                    )
+
+            status = json.loads(status_file.read_text())
+
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["candidates"], 0)
+        self.assertEqual(status["providers"]["shodan"]["status"], "error")
+        self.assertEqual(status["error_type"], "DiscoveryProvidersUnavailable")
 
 
 if __name__ == "__main__":
