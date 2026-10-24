@@ -15,6 +15,7 @@ PYTHON_BIN="${PYTHON_BIN:-$SCANNER_DIR/venv/bin/python}"
 DISCOVERY_SOURCES="${DISCOVERY_SOURCES:-shodan,commoncrawl,builtwith}"
 MAX_PER_SOURCE="${MAX_PER_SOURCE:-20000}"
 SCAN_BATCH_SIZE="${SCAN_BATCH_SIZE:-20}"
+DISCOVERY_ONLY="${DISCOVERY_ONLY:-false}"
 
 mkdir -p "$TARGETS_DIR"
 
@@ -70,12 +71,18 @@ cd "$SCANNER_DIR"
 TS="$(date -u '+%Y%m%d_%H%M%S')_$$"
 FINDINGS="$RESULTS_DIR/findings_${TS}.jsonl"
 INVENTORY="$RESULTS_DIR/inventory_${TS}.jsonl"
+DISCOVERY_ARGS=(
+  --sources "$DISCOVERY_SOURCES"
+  --max-per-source "$MAX_PER_SOURCE"
+  --batch "$SCAN_BATCH_SIZE"
+  --output "$FINDINGS"
+  --inventory-output "$INVENTORY"
+)
+if [[ "$DISCOVERY_ONLY" =~ ^(1|true|yes|on)$ ]]; then
+  DISCOVERY_ARGS+=(--discover-only)
+fi
 if ! "$PYTHON_BIN" "$SCANNER_DIR/discovery.py" \
-  --sources "$DISCOVERY_SOURCES" \
-  --max-per-source "$MAX_PER_SOURCE" \
-  --batch "$SCAN_BATCH_SIZE" \
-  --output "$FINDINGS" \
-  --inventory-output "$INVENTORY" \
+  "${DISCOVERY_ARGS[@]}" \
   >> "$LOG" 2>&1; then
   log "Discovery failed: scanner process returned a non-zero status"
   exit 1

@@ -93,6 +93,45 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["scanned"], 1)
         self.assertEqual(status["findings"], 1)
 
+    async def test_discovery_only_writes_candidates_without_scanning(self):
+        target = DiscoveryTarget("https://example.test", {"commoncrawl"})
+        target.metadata["commoncrawl"].append(
+            {"marker": "sb_publishable", "confidence": "high"}
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            findings = Path(temp_dir) / "findings.jsonl"
+            inventory = Path(temp_dir) / "inventory.jsonl"
+            status_file = Path(temp_dir) / "discovery-status.json"
+            with (
+                patch(
+                    "discovery.discover_targets",
+                    AsyncMock(return_value={target.url: target}),
+                ),
+                patch("discovery._scan_batch", AsyncMock()) as scan_batch,
+                patch("discovery.DISCOVERY_STATUS_FILE", status_file),
+            ):
+                await run_discovery_scan(
+                    ["commoncrawl"],
+                    max_per_source=1,
+                    batch_size=1,
+                    findings_output=findings,
+                    inventory_output=inventory,
+                    active_scan=False,
+                )
+
+            record = json.loads(inventory.read_text())
+            status = json.loads(status_file.read_text())
+
+        scan_batch.assert_not_awaited()
+        self.assertFalse(findings.exists())
+        self.assertEqual(record["status"], "candidate")
+        self.assertEqual(record["discovery_confidence"], "high")
+        self.assertEqual(record["sources"], ["commoncrawl"])
+        self.assertEqual(status["status"], "discovered")
+        self.assertEqual(status["candidates"], 1)
+        self.assertEqual(status["scanned"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

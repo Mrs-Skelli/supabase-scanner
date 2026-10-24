@@ -463,6 +463,7 @@ def _summarize(rec: dict) -> dict:
         "target": rec.get("target"),
         "timestamp": rec.get("timestamp"),
         "sources": rec.get("sources", []),
+        "discovery_confidence": rec.get("discovery_confidence", "unknown"),
         "credential_count": len(rec.get("credentials", []) or []),
         "sensitive_key_exposure_count": sum(
             item.get("occurrence_count", 0)
@@ -516,6 +517,7 @@ async def finding_detail(target: str, raw: bool = False):
                 "target": rendered.get("target"),
                 "timestamp": rendered.get("timestamp"),
                 "sources": rendered.get("sources", []),
+                "discovery_confidence": rendered.get("discovery_confidence", "unknown"),
                 "credentials": creds,
                 "sensitive_key_exposures": rendered.get("sensitive_key_exposures", []),
                 "vulnerable_tables": rendered.get("vulnerable_tables", []),

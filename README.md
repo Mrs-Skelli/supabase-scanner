@@ -36,6 +36,10 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 - Web UI for one-off scans
 - REST API for programmatic use
 - Discovery adapters for Shodan, Common Crawl, and BuiltWith
+- Passive discovery-only mode with provider pagination, retry/backoff, and
+  de-duplicated, confidence-ranked candidate inventories
+- Modern environment-name, Realtime, Storage, Auth/JWKS, custom-domain, and
+  self-hosted service-route fingerprints
 - Rate limiting (10 scans/min per IP)
 - Docker + nginx config ready for self-hosting
 - Findings saved as JSONL for easy processing
@@ -118,14 +122,26 @@ python shodan_scanner.py --max 5000 --batch 20 --output results/run1.jsonl
 
 # Custom Shodan query
 python shodan_scanner.py --query 'http.html:"supabase.co" http.html:"eyJhbGciOiJIUzI1NiIs"'
+
+# Collect passive candidates without sending requests to discovered targets
+python discovery.py --discover-only --max-per-source 20000
 ```
 
 `shodan_cron.sh` uses paths relative to the repository and safely parses simple
 `KEY=VALUE` entries from `.env` without executing the file. Its interpreter,
 output directory, source list, provider cap, and batch size can be overridden
 with `PYTHON_BIN`, `RESULTS_DIR`, `DISCOVERY_SOURCES`, `MAX_PER_SOURCE`, and
-`SCAN_BATCH_SIZE`. A provider run that produces no current inventory exits
-non-zero rather than reusing an older file.
+`SCAN_BATCH_SIZE`. Set `DISCOVERY_ONLY=true` to make the scheduled job write a
+de-duplicated candidate inventory without probing discovered targets. A provider
+run that produces no current inventory exits non-zero rather than reusing an
+older file.
+
+The fingerprint scanner recognizes documented browser configuration names such
+as `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and
+`VITE_SUPABASE_PUBLISHABLE_KEY`. It also pairs nearby public keys with
+documented Realtime, Storage, Auth/JWKS, REST, GraphQL, and Functions URLs. A
+service URL without a nearby key remains a passive lead and is not treated as a
+confirmed Supabase client configuration.
 
 Findings are saved as JSONL in `results/` — one JSON object per target with an
 anonymously readable table or a detected privileged-key exposure.

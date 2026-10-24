@@ -9,9 +9,11 @@ import shodan
 from discovery import ShodanDiscoveryUnavailable, _discover_shodan
 from scanner import ScanResult, SensitiveKeyExposure
 from shodan_scanner import (
+    SHODAN_QUERIES,
     ShodanSourceUnavailable,
     _iter_shodan_targets,
     run_shodan_scan,
+    shodan_query_confidence,
 )
 
 
@@ -40,6 +42,21 @@ class OneResultShodanAPI:
 
 
 class ShodanFailureTests(unittest.TestCase):
+    def test_queries_include_documented_modern_client_signals(self):
+        combined = " ".join(SHODAN_QUERIES)
+
+        self.assertIn("sb_publishable_", combined)
+        self.assertIn("NEXT_PUBLIC_SUPABASE_URL", combined)
+        self.assertIn("/storage/v1/object/public/", combined)
+        self.assertIn("/auth/v1/.well-known/jwks.json", combined)
+        self.assertIn("/realtime/v1/websocket", combined)
+
+        self.assertEqual(shodan_query_confidence(SHODAN_QUERIES[0]), "high")
+        self.assertEqual(
+            shodan_query_confidence('ssl.cert.subject.cn:"*.supabase.co"'),
+            "low",
+        )
+
     def test_first_page_error_is_raised_to_the_provider_boundary(self):
         with self.assertRaises(shodan.APIError):
             list(_iter_shodan_targets(FailingShodanAPI(), "query", 10))

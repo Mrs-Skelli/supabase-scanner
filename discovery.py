@@ -32,6 +32,7 @@ from shodan_scanner import (
     SHODAN_QUERIES,
     _iter_shodan_targets,
     _shodan_client,
+    shodan_query_confidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,19 @@ class DiscoveryTarget:
     metadata: dict[str, list[dict[str, Any]]] = field(
         default_factory=lambda: defaultdict(list)
     )
+
+
+_CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def _target_confidence(target: DiscoveryTarget) -> str:
+    confidence = "low"
+    for entries in target.metadata.values():
+        for entry in entries:
+            candidate = entry.get("confidence")
+            if _CONFIDENCE_RANK.get(candidate, 0) > _CONFIDENCE_RANK[confidence]:
+                confidence = candidate
+    return confidence
 
 
 def _normalize_url(url: str) -> str | None:
@@ -81,6 +95,7 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
         "sensitive_key_exposure_count": sensitive_key_exposure_count,
         "js_files_scanned": result.js_files_scanned,
         "error": result.error,
+        "discovery_confidence": _target_confidence(target),
         "sources": sorted(target.sources),
         "source_metadata": {k: v for k, v in target.metadata.items()},
         "credentials": [
@@ -132,6 +147,18 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
     }
 
 
+def _serialize_candidate(target: DiscoveryTarget) -> dict[str, Any]:
+    """Serialize passive lead metadata without probing the target."""
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "target": target.url,
+        "status": "candidate",
+        "discovery_confidence": _target_confidence(target),
+        "sources": sorted(target.sources),
+        "source_metadata": {k: v for k, v in target.metadata.items()},
+    }
+
+
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as output:
@@ -152,7 +179,14 @@ async def _discover_shodan(max_results: int) -> list[dict[str, Any]]:
                     continue
                 seen.add(norm)
                 results.append(
-                    {"url": norm, "source": "shodan", "metadata": {"query": query}}
+                    {
+                        "url": norm,
+                        "source": "shodan",
+                        "metadata": {
+                            "query": query,
+                            "confidence": shodan_query_confidence(query),
+                        },
+                    }
                 )
                 if len(results) >= max_results:
                     return results
@@ -244,6 +278,7 @@ async def run_discovery_scan(
     batch_size: int,
     findings_output: Path | None = None,
     inventory_output: Path | None = None,
+    active_scan: bool = True,
 ) -> tuple[Path, Path]:
     if max_per_source < 1:
         raise ValueError("max_per_source must be at least 1")
@@ -314,6 +349,20 @@ async def run_discovery_scan(
             "Discovery candidates collected",
             extra={"event": "candidates_collected", "candidates": len(target_list)},
         )
+
+        if not active_scan:
+            for target in target_list:
+                _append_jsonl(inventory_output, _serialize_candidate(target))
+            persist_status("discovered")
+            logger.info(
+                "Passive discovery completed",
+                extra={
+                    "event": "passive_discovery_completed",
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "candidates": len(target_list),
+                },
+            )
+            return findings_output, inventory_output
 
         for i in range(0, len(target_list), batch_size):
             batch = target_list[i : i + batch_size]
@@ -390,10 +439,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--inventory-output", type=Path, help="All scanned targets JSONL output path"
     )
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Collect and de-duplicate passive candidates without probing targets",
+    )
     args = parser.parse_args()
     srcs = [s.strip() for s in args.sources.split(",") if s.strip()]
     asyncio.run(
         run_discovery_scan(
-            srcs, args.max_per_source, args.batch, args.output, args.inventory_output
+            srcs,
+            args.max_per_source,
+            args.batch,
+            args.output,
+            args.inventory_output,
+            active_scan=not args.discover_only,
         )
     )

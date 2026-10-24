@@ -27,12 +27,41 @@ class ShodanSourceUnavailable(RuntimeError):
 # Shodan search query that finds pages referencing Supabase
 # Multiple queries for maximum Supabase coverage
 SHODAN_QUERIES = [
-    'ssl.cert.subject.cn:"*.supabase.co"',  # Hosted Supabase (highest yield)
-    'ssl.cert.subject.cn:"*.supabase.in"',  # Alternative Supabase domain
+    'http.html:"sb_publishable_"',  # Modern public client keys
+    'http.html:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"',  # Legacy API keys
+    'http.html:"NEXT_PUBLIC_SUPABASE_URL"',  # Next.js configuration
+    'http.html:"VITE_SUPABASE_URL"',  # Vite configuration
+    'http.html:"SUPABASE_ANON_KEY"',  # Legacy framework configuration
     'http.html:"supabase.co"',  # Frontend JS references
+    'http.html:"@supabase/supabase-js"',  # SDK imports and CDN bundles
+    'http.html:"/storage/v1/object/public/"',  # Public Storage URLs
+    'http.html:"/auth/v1/.well-known/jwks.json"',  # Auth/JWKS references
+    'http.html:"/realtime/v1/websocket"',  # Hosted Realtime URLs
+    'http.html:"/socket/websocket" http.html:"apikey="',  # Self-hosted Realtime
+    'ssl.cert.subject.cn:"*.supabase.co"',  # Hosted API infrastructure
+    'ssl.cert.subject.cn:"*.supabase.in"',  # Alternative API infrastructure
     'http.component:"PostgREST"',  # Self-hosted PostgREST
 ]
 SHODAN_QUERY = SHODAN_QUERIES[0]  # Default for CLI --query
+
+
+def shodan_query_confidence(query: str) -> str:
+    """Classify the passive signal without treating it as vulnerability proof."""
+    if any(
+        marker in query
+        for marker in (
+            "sb_publishable_",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "NEXT_PUBLIC_SUPABASE_URL",
+            "VITE_SUPABASE_URL",
+            "SUPABASE_ANON_KEY",
+        )
+    ):
+        return "high"
+    if "ssl.cert.subject.cn" in query or 'http.component:"PostgREST"' in query:
+        return "low"
+    return "medium"
+
 
 # Output directory for findings
 RESULTS_DIR = Path("results")

@@ -69,6 +69,7 @@ async def discover_targets(
                             "domain": domain,
                             "first_detected": item.get("FD"),
                             "last_detected": item.get("LD"),
+                            "confidence": "medium",
                         },
                     }
                 )

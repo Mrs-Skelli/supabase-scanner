@@ -32,7 +32,8 @@ _SECRET_KEY = r"sb_secret_[A-Za-z0-9_-]{20,}"
 _PUBLIC_KEY = rf"(?:{_LEGACY_PUBLIC_KEY}|{_PUBLISHABLE_KEY})"
 
 SUPABASE_URL_RE = re.compile(
-    r"https?://[a-zA-Z0-9-]+\.supabase\.co(?:/[^\s\"']*)?", re.IGNORECASE
+    r"https?://[a-zA-Z0-9-]+\.supabase\.(?:co|in)(?:/[^\s\"']*)?",
+    re.IGNORECASE,
 )
 PUBLIC_KEY_RE = re.compile(_PUBLIC_KEY)
 SECRET_KEY_RE = re.compile(_SECRET_KEY)
@@ -42,16 +43,33 @@ CREATE_CLIENT_RE = re.compile(
     re.IGNORECASE,
 )
 SUPABASE_URL_CONFIG_RE = re.compile(
-    r"(?:supabase[_-]?url|SUPABASE_URL)\s*[:=]\s*[\"']"
+    r"(?<![A-Za-z0-9_])[\"']?"
+    r"(?:(?:(?:NEXT_PUBLIC|VITE|PUBLIC)_)?SUPABASE_URL|supabase[_-]?url)"
+    r"[\"']?\s*[:=]\s*[\"']"
     r"(?P<url>https?://[^\"']+)[\"']",
     re.IGNORECASE,
 )
 SUPABASE_KEY_CONFIG_RE = re.compile(
-    rf"(?:supabase[_-]?(?:anon[_-]?)?key|anon[_-]?key|SUPABASE_(?:ANON_)?KEY)"
+    rf"(?<![A-Za-z0-9_])[\"']?"
+    rf"(?:(?:(?:NEXT_PUBLIC|VITE|PUBLIC)_)?SUPABASE_"
+    rf"(?:(?:ANON|PUBLISHABLE|SECRET|SERVICE_ROLE)_)?KEY|"
+    rf"supabase[_-]?(?:(?:anon|publishable|secret|service[_-]?role)[_-]?)?key|"
+    rf"anon[_-]?key)"
+    rf"[\"']?"
     rf"\s*[:=]\s*[\"'](?P<key>{_PUBLIC_KEY}|{_SECRET_KEY})[\"']",
     re.IGNORECASE,
 )
+SUPABASE_SERVICE_URL_RE = re.compile(
+    r"(?P<url>(?:https?|wss?)://[A-Za-z0-9._:-]+"
+    r"/(?:"
+    r"(?:rest|auth|storage|realtime|functions)/v1(?:/[^\s\"'<>]*)?"
+    r"|graphql/v1(?:[^\s\"'<>]*)?"
+    r"|socket/websocket(?:[^\s\"'<>]*)?"
+    r"))",
+    re.IGNORECASE,
+)
 MAX_CONFIG_PAIR_DISTANCE = 500
+MAX_SERVICE_PAIR_DISTANCE = 1500
 # Extract table names from Supabase client calls such as .from("table_name").
 TABLE_FROM_RE = re.compile(r'\.from\(\s*["\x27]([a-zA-Z_][a-zA-Z0-9_]*)["\x27]\s*\)')
 # Also catch rpc calls: .rpc("function_name")
@@ -328,6 +346,24 @@ def _normalize_supabase_url(value: str) -> str | None:
     return normalized
 
 
+def _origin_from_service_url(value: str) -> str | None:
+    """Return an HTTP API origin from a documented Supabase service URL."""
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https", "ws", "wss"} or not parsed.hostname:
+        return None
+    scheme = (
+        "https"
+        if parsed.scheme == "wss"
+        else "http"
+        if parsed.scheme == "ws"
+        else parsed.scheme
+    )
+    return f"{scheme}://{parsed.netloc}"
+
+
 def _project_id_for_url(supabase_url: str) -> str:
     hostname = urlparse(supabase_url).hostname or "unknown"
     hosted_suffix = ".supabase.co"
@@ -443,6 +479,24 @@ def _find_client_config(
         for key_match in key_configs:
             if abs(url_match.start() - key_match.start()) <= MAX_CONFIG_PAIR_DISTANCE:
                 pairs.add((url_match.group("url"), key_match.group("key")))
+
+    # Documented Supabase service URLs survive bundling even when createClient()
+    # does not. Pair only a nearby public/secret key with the service origin so
+    # arbitrary REST or WebSocket URLs are never treated as Supabase by themselves.
+    service_urls = list(SUPABASE_SERVICE_URL_RE.finditer(text))
+    key_matches = list(PUBLIC_KEY_RE.finditer(text)) + list(
+        SECRET_KEY_RE.finditer(text)
+    )
+    for service_match in service_urls:
+        origin = _origin_from_service_url(service_match.group("url"))
+        if not origin:
+            continue
+        for key_match in key_matches:
+            if (
+                abs(service_match.start() - key_match.start())
+                <= MAX_SERVICE_PAIR_DISTANCE
+            ):
+                pairs.add((origin, key_match.group(0)))
 
     # Hosted project URLs are independently distinctive. Preserve the legacy
     # same-file pairing behavior for bundles that inline URL and key separately.

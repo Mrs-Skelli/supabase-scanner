@@ -101,6 +101,7 @@ function renderList(){
         ${f.sensitive_key_exposure_count?`<span class="pill red">${f.sensitive_key_exposure_count} sensitive key occurrence(s)</span>`:""}
         <span class="pill">${(f.total_rows_exposed||0).toLocaleString()} rows</span>
         <span class="pill">${(f.sources||[]).join(",")||"—"}</span>
+        <span class="pill">confidence: ${esc(f.discovery_confidence||"unknown")}</span>
       </div>
     </div>`).join("");
   [...el.querySelectorAll(".tgt")].forEach(n=>n.onclick=()=>selectTarget(+n.dataset.i));
@@ -135,7 +136,7 @@ function renderDetail(){
       <button onclick="move(1)">next ↓</button>
     </div>
     <div class="dhost">${esc(current.target)}</div>
-    <div class="dmeta">scanned ${esc((current.timestamp||"").replace('T',' ').slice(0,19))} UTC · ${tables.length} anonymously readable tables · sources: ${(current.sources||[]).join(", ")||"—"}</div>
+    <div class="dmeta">scanned ${esc((current.timestamp||"").replace('T',' ').slice(0,19))} UTC · ${tables.length} anonymously readable tables · sources: ${(current.sources||[]).join(", ")||"—"} · discovery confidence: ${esc(current.discovery_confidence||"unknown")}</div>
     ${creds?`<div class="creds"><b class="kv">public client config</b>${creds}</div>`:""}
     ${sensitive?`<div class="creds"><b class="kv">sensitive key exposure metadata</b>${sensitive}</div>`:""}
     ${tableSection}

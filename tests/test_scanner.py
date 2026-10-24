@@ -131,6 +131,65 @@ class ScannerParsingTests(unittest.TestCase):
         self.assertEqual(len(credentials), 1)
         self.assertEqual(credentials[0].supabase_url, "https://db.example.test")
 
+    def test_documented_next_public_config_recognizes_custom_domain(self):
+        source = (
+            '{"NEXT_PUBLIC_SUPABASE_URL":"https://api.example.test",'
+            f'"NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY":"{self.publishable_key}"}}'
+        )
+
+        with patch("scanner.validate_url", return_value=None):
+            credentials = _find_credentials(source, "fixture.js")
+
+        self.assertEqual(len(credentials), 1)
+        self.assertEqual(credentials[0].supabase_url, "https://api.example.test")
+
+    def test_documented_vite_config_recognizes_custom_domain(self):
+        source = (
+            'const VITE_SUPABASE_URL = "https://db.example.test";'
+            f'const VITE_SUPABASE_PUBLISHABLE_KEY = "{self.publishable_key}";'
+        )
+
+        with patch("scanner.validate_url", return_value=None):
+            credentials = _find_credentials(source, "fixture.js")
+
+        self.assertEqual(len(credentials), 1)
+        self.assertEqual(credentials[0].supabase_url, "https://db.example.test")
+
+    def test_realtime_url_pairs_key_with_custom_domain(self):
+        source = (
+            "const socket = "
+            f'"wss://realtime.example.test/socket/websocket?apikey={self.publishable_key}";'
+        )
+
+        with patch("scanner.validate_url", return_value=None):
+            credentials = _find_credentials(source, "fixture.js")
+
+        self.assertEqual(len(credentials), 1)
+        self.assertEqual(credentials[0].supabase_url, "https://realtime.example.test")
+
+    def test_storage_url_pairs_nearby_key_with_custom_domain(self):
+        source = (
+            'const avatar = "https://api.example.test/storage/v1/object/public/'
+            'avatars/user.png";'
+            f'const publicKey = "{self.publishable_key}";'
+        )
+
+        with patch("scanner.validate_url", return_value=None):
+            credentials = _find_credentials(source, "fixture.js")
+
+        self.assertEqual(len(credentials), 1)
+        self.assertEqual(credentials[0].supabase_url, "https://api.example.test")
+
+    def test_service_url_without_key_is_only_a_weak_signal(self):
+        source = (
+            'const endpoint = "https://api.example.test/auth/v1/.well-known/jwks.json";'
+        )
+
+        with patch("scanner.validate_url", return_value=None):
+            credentials = _find_credentials(source, "fixture.js")
+
+        self.assertEqual(credentials, [])
+
     def test_unpaired_custom_domain_is_not_treated_as_supabase(self):
         source = (
             'const endpoint = "https://api.example.test";'
