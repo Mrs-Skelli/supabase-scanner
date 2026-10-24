@@ -5,7 +5,6 @@ each discovered target through the core scanner.
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -13,9 +12,12 @@ from pathlib import Path
 
 import shodan
 
-from masking import EvidenceConfig, credential_preview, prepare_sample_data
+from finding_records import append_jsonl, serialize_evidence
+from masking import EvidenceConfig
 from observability import configure_logging
-from scanner import ScanResult, scan
+from scan_batch import scan_urls
+from scan_models import ScanResult
+from scanner import scan
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +66,9 @@ def shodan_query_confidence(query: str) -> str:
 
 
 # Output directory for findings
-RESULTS_DIR = Path("results")
+RESULTS_DIR = Path(
+    os.getenv("RESULTS_DIR", Path(__file__).resolve().parent / "results")
+)
 
 
 def _shodan_client() -> shodan.Shodan:
@@ -116,59 +120,19 @@ def _iter_shodan_targets(api: shodan.Shodan, query: str, max_results: int):
 
 
 async def _scan_batch(urls: list[str]) -> list[ScanResult]:
-    """Scan a batch of URLs concurrently."""
-    tasks = [scan(url) for url in urls]
-    return await asyncio.gather(*tasks, return_exceptions=False)
+    """Scan a batch while isolating one unexpected target failure."""
+    return await scan_urls(urls, scan, logger)
 
 
 def _save_finding(result: ScanResult, output_file: Path) -> None:
     """Append independently reportable, safely serialized evidence."""
     evidence = EvidenceConfig.from_environment()
-    sensitive_key_exposure_count = sum(
-        exposure.occurrence_count for exposure in result.sensitive_key_exposures
-    )
     record = {
         "timestamp": datetime.now(UTC).isoformat(),
         "target": result.target_url,
-        "masked": not evidence.raw_values,
-        "sample_mode": ("raw_secrets_redacted" if evidence.raw_values else "masked"),
-        "finding_count": len(result.vulnerable_tables) + sensitive_key_exposure_count,
-        "sensitive_key_exposure_count": sensitive_key_exposure_count,
-        "credentials": [
-            {
-                "supabase_url": c.supabase_url,
-                "project_id": c.project_id,
-                "anon_key_preview": credential_preview(c.anon_key),
-                "source_file": c.source_file,
-            }
-            for c in result.credentials
-        ],
-        "sensitive_key_exposures": [
-            {
-                "key_type": exposure.key_type,
-                "occurrence_count": exposure.occurrence_count,
-                "source_file": exposure.source_file,
-                "fingerprint": exposure.fingerprint,
-            }
-            for exposure in result.sensitive_key_exposures
-        ],
-        "vulnerable_tables": [
-            {
-                "name": t.name,
-                "row_count": t.row_count,
-                "sample_columns": t.sample_columns,
-                "sample_data": prepare_sample_data(
-                    t.sample_data,
-                    raw_values=evidence.raw_values,
-                    limit=evidence.sample_limit,
-                ),
-            }
-            for t in result.vulnerable_tables
-        ],
     }
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with output_file.open("a", encoding="utf-8") as output:
-        output.write(json.dumps(record, ensure_ascii=False) + "\n")
+    record.update(serialize_evidence(result, evidence, include_tables_checked=False))
+    append_jsonl(output_file, record)
 
 
 async def run_shodan_scan(

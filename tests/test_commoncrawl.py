@@ -88,6 +88,21 @@ class CommonCrawlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 1)
         delay.assert_awaited_once()
 
+    async def test_exhausted_index_query_is_a_provider_failure_signal(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="busy")
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with patch("commoncrawl_source.asyncio.sleep", AsyncMock()):
+                with self.assertRaises(commoncrawl_source.CommonCrawlQueryUnavailable):
+                    await commoncrawl_source._query_index(
+                        client,
+                        "https://index.example.test/crawl-index",
+                        "*supabase*",
+                        1,
+                    )
+
     async def test_modern_config_marker_discovers_custom_domain(self):
         record = {
             "url": "https://app.example.test/assets/supabase-client.js",
@@ -140,6 +155,39 @@ class CommonCrawlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(body)
         client.get.assert_not_awaited()
+
+    async def test_malformed_warc_range_is_not_fetched(self):
+        client = AsyncMock()
+        body = await commoncrawl_source._fetch_warc_body(
+            client,
+            {
+                "filename": "segment.warc.gz",
+                "offset": "not-a-number",
+                "length": "10",
+            },
+        )
+
+        self.assertIsNone(body)
+        client.get.assert_not_awaited()
+
+    async def test_all_index_query_failures_fail_the_provider(self):
+        with (
+            patch(
+                "commoncrawl_source._get_recent_indexes",
+                AsyncMock(return_value=["https://index.example.test/crawl-index"]),
+            ),
+            patch(
+                "commoncrawl_source._query_index",
+                AsyncMock(
+                    side_effect=commoncrawl_source.CommonCrawlQueryUnavailable(
+                        "unavailable"
+                    )
+                ),
+            ),
+            patch("commoncrawl_source.COMMONCRAWL_QUERY_PATTERNS", ["*supabase*"]),
+        ):
+            with self.assertRaises(commoncrawl_source.CommonCrawlUnavailable):
+                await commoncrawl_source.discover_targets(max_results=1)
 
 
 if __name__ == "__main__":

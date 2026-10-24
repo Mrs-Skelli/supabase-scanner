@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 from discovery import (
     DiscoveryProvidersUnavailable,
     DiscoveryTarget,
+    _run_outcome,
+    _scan_batch,
     discover_targets,
     run_discovery_scan,
 )
@@ -15,6 +17,62 @@ from scanner import ScanResult, SensitiveKeyExposure
 
 
 class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_or_empty_provider_sets_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            await discover_targets([], 1)
+        with self.assertRaisesRegex(ValueError, "unknown discovery source"):
+            await discover_targets(["typo"], 1)
+
+    async def test_one_target_exception_does_not_abort_the_batch(self):
+        async def fake_scan(url: str) -> ScanResult:
+            if "broken" in url:
+                raise RuntimeError("raw signed request detail")
+            return ScanResult(target_url=url)
+
+        targets = [
+            DiscoveryTarget("https://broken.example.test"),
+            DiscoveryTarget("https://healthy.example.test"),
+        ]
+        with (
+            patch("discovery.scan", side_effect=fake_scan),
+            self.assertLogs("discovery", level="WARNING") as logs,
+        ):
+            results = await _scan_batch(targets)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].error, "scan failed (RuntimeError)")
+        self.assertIsNone(results[1].error)
+        self.assertNotIn("raw signed request detail", " ".join(logs.output))
+
+    def test_run_outcome_distinguishes_partial_empty_and_failed_refreshes(self):
+        self.assertEqual(
+            _run_outcome(
+                active_scan=False,
+                candidate_count=2,
+                provider_status={
+                    "shodan": {"status": "error"},
+                    "commoncrawl": {"status": "ok"},
+                },
+            ),
+            "partial",
+        )
+        self.assertEqual(
+            _run_outcome(
+                active_scan=False,
+                candidate_count=0,
+                provider_status={"commoncrawl": {"status": "ok"}},
+            ),
+            "empty",
+        )
+        self.assertEqual(
+            _run_outcome(
+                active_scan=False,
+                candidate_count=0,
+                provider_status={"shodan": {"status": "error"}},
+            ),
+            "failed",
+        )
+
     async def test_failed_provider_does_not_discard_other_results(self):
         shodan_result = [
             {

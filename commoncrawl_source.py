@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+import io
 import json
 import logging
 import math
@@ -39,6 +40,7 @@ COMMONCRAWL_USER_AGENT = (
 MAX_INDEX_PAGE_RESULTS = 100
 MAX_INDEX_PAGES = 10
 MAX_WARC_RECORD_SIZE = 10 * 1024 * 1024
+MAX_DECOMPRESSED_WARC_SIZE = 20 * 1024 * 1024
 EXCLUDED_HOST_SUFFIXES = (
     ".supabase.co",
     ".supabase.in",
@@ -51,6 +53,10 @@ EXCLUDED_HOST_SUFFIXES = (
 
 class CommonCrawlUnavailable(RuntimeError):
     """Raised when Common Crawl cannot provide its index catalogue."""
+
+
+class CommonCrawlQueryUnavailable(RuntimeError):
+    """Raised when one index query exhausts its safe retry budget."""
 
 
 def _normalize_origin(url: str) -> str | None:
@@ -70,21 +76,39 @@ def _is_excluded_host(host: str) -> bool:
     )
 
 
-async def _get_recent_indexes(client: httpx.AsyncClient, count: int) -> list[str]:
-    response = None
+async def _get_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    timeout: float,
+    params: dict | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """GET one Common Crawl resource with a small exponential retry budget."""
     for attempt in range(3):
         try:
-            response = await client.get(COLLINFO_URL, timeout=20)
+            response = await client.get(
+                url,
+                timeout=timeout,
+                params=params,
+                headers=headers,
+            )
             response.raise_for_status()
-            break
+            return response
         except httpx.HTTPError:
             if attempt == 2:
-                raise CommonCrawlUnavailable(
-                    "Common Crawl index catalogue unavailable"
-                ) from None
+                raise
             await asyncio.sleep(2**attempt)
-    if response is None:
-        raise CommonCrawlUnavailable("Common Crawl index catalogue unavailable")
+    raise RuntimeError("unreachable retry state")
+
+
+async def _get_recent_indexes(client: httpx.AsyncClient, count: int) -> list[str]:
+    try:
+        response = await _get_with_retries(client, COLLINFO_URL, timeout=20)
+    except httpx.HTTPError:
+        raise CommonCrawlUnavailable(
+            "Common Crawl index catalogue unavailable"
+        ) from None
     try:
         data = response.json()
     except ValueError:
@@ -120,25 +144,24 @@ async def _query_index(
             "limit": str(page_size),
             "page": str(page),
         }
-        response = None
-        for attempt in range(3):
-            try:
-                response = await client.get(index_api, params=params, timeout=30)
-                response.raise_for_status()
-                break
-            except httpx.HTTPError as exc:
-                if attempt == 2:
-                    logger.warning(
-                        "Common Crawl query failed",
-                        extra={
-                            "event": "commoncrawl_query_failed",
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                    return records
-                await asyncio.sleep(2**attempt)
-        if response is None:
-            break
+        try:
+            response = await _get_with_retries(
+                client,
+                index_api,
+                params=params,
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Common Crawl query failed",
+                extra={
+                    "event": "commoncrawl_query_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise CommonCrawlQueryUnavailable(
+                "Common Crawl index query unavailable"
+            ) from None
 
         page_records = []
         for line in response.text.splitlines():
@@ -163,17 +186,27 @@ async def _fetch_warc_body(client: httpx.AsyncClient, record: dict) -> str | Non
     if not filename or offset is None or length is None:
         return None
 
-    start = int(offset)
-    record_length = int(length)
+    try:
+        start = int(offset)
+        record_length = int(length)
+    except (TypeError, ValueError):
+        return None
     if record_length < 1 or record_length > MAX_WARC_RECORD_SIZE:
         return None
     end = start + record_length - 1
     headers = {"Range": f"bytes={start}-{end}"}
     try:
-        resp = await client.get(DATA_URL.format(filename), headers=headers, timeout=30)
-        resp.raise_for_status()
-        raw = gzip.decompress(resp.content)
+        response = await client.get(
+            DATA_URL.format(filename), headers=headers, timeout=30
+        )
+        response.raise_for_status()
+        if len(response.content) > MAX_WARC_RECORD_SIZE:
+            return None
+        with gzip.GzipFile(fileobj=io.BytesIO(response.content)) as archive:
+            raw = archive.read(MAX_DECOMPRESSED_WARC_SIZE + 1)
     except (httpx.HTTPError, OSError, ValueError):
+        return None
+    if len(raw) > MAX_DECOMPRESSED_WARC_SIZE:
         return None
 
     marker = b"\r\n\r\n"
@@ -202,6 +235,8 @@ async def discover_targets(
 ) -> list[dict]:
     discovered: dict[str, dict] = {}
     query_limit = per_query_limit or min(max_results, 1000)
+    successful_queries = 0
+    failed_queries = 0
     async with httpx.AsyncClient(
         follow_redirects=True,
         headers={"User-Agent": COMMONCRAWL_USER_AGENT},
@@ -209,7 +244,14 @@ async def discover_targets(
         indexes = await _get_recent_indexes(client, recent_indexes)
         for index_api in indexes:
             for pattern in COMMONCRAWL_QUERY_PATTERNS:
-                records = await _query_index(client, index_api, pattern, query_limit)
+                try:
+                    records = await _query_index(
+                        client, index_api, pattern, query_limit
+                    )
+                    successful_queries += 1
+                except CommonCrawlQueryUnavailable:
+                    failed_queries += 1
+                    continue
                 for record in records:
                     url = record.get("url")
                     if not url:
@@ -261,4 +303,6 @@ async def discover_targets(
                     }
                     if len(discovered) >= max_results:
                         return list(discovered.values())
+    if failed_queries and not successful_queries:
+        raise CommonCrawlUnavailable("all Common Crawl index queries failed")
     return list(discovered.values())

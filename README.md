@@ -243,6 +243,27 @@ ruff check .
 pytest
 ```
 
+### Architecture and safety boundaries
+
+- `fingerprints.py` parses supplied HTML and JavaScript. It cannot perform
+  network requests and must receive the fail-closed URL validator before a
+  detected endpoint becomes usable configuration.
+- `supabase_probe.py` owns the bounded schema and one-row access requests.
+  Publishable keys are sent only as `apikey`; a bearer header is added only for
+  a legacy anon JWT or an explicitly supplied user token.
+- `scanner.py` is the single orchestration boundary connecting fetched target
+  content to active Supabase probes.
+- `finding_records.py` is the only persisted-evidence serializer. Reusable keys
+  never cross that boundary; raw application evidence remains bounded,
+  deployment-gated, explicitly requested for display, and secret-redacted.
+- `discovery.py` merges passive providers. Its discovery-only branch writes
+  candidates and returns before the separate active-scanning branch can call
+  the target scanner.
+
+Provider adapters may fail independently. A partial refresh is recorded as
+partial, while a run where every enabled provider fails exits non-zero instead
+of presenting stale or empty output as a successful refresh.
+
 ---
 
 ## Responsible disclosure

@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import json
 import logging
 import os
 import time
@@ -16,7 +15,8 @@ import shodan
 
 import builtwith_source
 import commoncrawl_source
-from masking import EvidenceConfig, credential_preview, prepare_sample_data
+from finding_records import append_jsonl, serialize_evidence
+from masking import EvidenceConfig
 from observability import (
     bind_operation,
     configure_logging,
@@ -26,7 +26,9 @@ from observability import (
     utc_now,
     write_status_file,
 )
-from scanner import ScanResult, scan
+from scan_batch import scan_urls
+from scan_models import ScanResult
+from scanner import scan
 from shodan_scanner import (
     RESULTS_DIR,
     SHODAN_QUERIES,
@@ -37,6 +39,7 @@ from shodan_scanner import (
 
 logger = logging.getLogger(__name__)
 DISCOVERY_STATUS_FILE = RESULTS_DIR / "diagnostics" / "discovery-status.json"
+SUPPORTED_SOURCES = frozenset({"shodan", "commoncrawl", "builtwith"})
 
 
 class ShodanDiscoveryUnavailable(RuntimeError):
@@ -54,6 +57,57 @@ class DiscoveryTarget:
     metadata: dict[str, list[dict[str, Any]]] = field(
         default_factory=lambda: defaultdict(list)
     )
+
+
+@dataclass
+class DiscoveryRunState:
+    """Mutable counters and derived status for one discovery execution."""
+
+    sources: list[str]
+    run_id: str = field(default_factory=lambda: new_id("discovery"))
+    started_at: str = field(default_factory=utc_now)
+    started_monotonic: float = field(default_factory=time.perf_counter)
+    providers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    candidates: int = 0
+    scanned: int = 0
+    public_configs: int = 0
+    findings: int = 0
+
+    def elapsed_ms(self) -> float:
+        return round((time.perf_counter() - self.started_monotonic) * 1000, 2)
+
+    def payload(self, status: str, error_type: str | None = None) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "status": status,
+            "started_at": self.started_at,
+            "finished_at": None if status == "running" else utc_now(),
+            "duration_ms": None if status == "running" else self.elapsed_ms(),
+            "sources": self.sources,
+            "providers": self.providers,
+            "candidates": self.candidates,
+            "scanned": self.scanned,
+            "public_configs": self.public_configs,
+            "findings": self.findings,
+            "error_type": error_type,
+        }
+
+    def persist(
+        self,
+        path: Path,
+        status: str,
+        error_type: str | None = None,
+    ) -> None:
+        try:
+            write_status_file(path, self.payload(status, error_type))
+        except OSError as exc:
+            logger.warning(
+                "Unable to write discovery status",
+                extra={
+                    "event": "status_write_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 _CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
@@ -104,75 +158,22 @@ def _normalize_url(url: str) -> str | None:
 
 def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, Any]:
     evidence = EvidenceConfig.from_environment()
-    sensitive_key_exposures = getattr(result, "sensitive_key_exposures", [])
-    sensitive_key_exposure_count = sum(
-        exposure.occurrence_count for exposure in sensitive_key_exposures
-    )
-    finding_count = len(result.vulnerable_tables) + sensitive_key_exposure_count
-    status = "finding" if finding_count else "clean"
+    status = "finding" if result.has_reportable_findings else "clean"
     if result.error:
         status = "error"
-    return {
+    record = {
         "timestamp": datetime.now(UTC).isoformat(),
         "target": result.target_url,
         "status": status,
-        "masked": not evidence.raw_values,
-        "sample_mode": ("raw_secrets_redacted" if evidence.raw_values else "masked"),
         "auth_mode": result.auth_mode,
-        "finding_count": finding_count,
-        "sensitive_key_exposure_count": sensitive_key_exposure_count,
         "js_files_scanned": result.js_files_scanned,
         "error": result.error,
         "discovery_confidence": _target_confidence(target),
         "sources": sorted(target.sources),
-        "source_metadata": {k: v for k, v in target.metadata.items()},
-        "credentials": [
-            {
-                "supabase_url": c.supabase_url,
-                "project_id": c.project_id,
-                "anon_key_preview": credential_preview(c.anon_key),
-                "source_file": c.source_file,
-            }
-            for c in result.credentials
-        ],
-        "sensitive_key_exposures": [
-            {
-                "key_type": exposure.key_type,
-                "occurrence_count": exposure.occurrence_count,
-                "source_file": exposure.source_file,
-                "fingerprint": exposure.fingerprint,
-            }
-            for exposure in sensitive_key_exposures
-        ],
-        "tables_checked": [
-            {
-                "name": t.name,
-                "row_count": t.row_count,
-                "sample_columns": t.sample_columns,
-                "rls_likely_disabled": t.rls_likely_disabled,
-                "error": t.error,
-                "sample_data": prepare_sample_data(
-                    t.sample_data,
-                    raw_values=evidence.raw_values,
-                    limit=evidence.sample_limit,
-                ),
-            }
-            for t in result.tables_checked
-        ],
-        "vulnerable_tables": [
-            {
-                "name": t.name,
-                "row_count": t.row_count,
-                "sample_columns": t.sample_columns,
-                "sample_data": prepare_sample_data(
-                    t.sample_data,
-                    raw_values=evidence.raw_values,
-                    limit=evidence.sample_limit,
-                ),
-            }
-            for t in result.vulnerable_tables
-        ],
+        "source_metadata": dict(target.metadata),
     }
+    record.update(serialize_evidence(result, evidence, include_tables_checked=True))
+    return record
 
 
 def _serialize_candidate(target: DiscoveryTarget) -> dict[str, Any]:
@@ -183,14 +184,8 @@ def _serialize_candidate(target: DiscoveryTarget) -> dict[str, Any]:
         "status": "candidate",
         "discovery_confidence": _target_confidence(target),
         "sources": sorted(target.sources),
-        "source_metadata": {k: v for k, v in target.metadata.items()},
+        "source_metadata": dict(target.metadata),
     }
-
-
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as output:
-        output.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 async def _discover_shodan(max_results: int) -> list[dict[str, Any]]:
@@ -231,9 +226,15 @@ async def discover_targets(
     max_per_source: int,
     provider_status: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, DiscoveryTarget]:
+    unknown_sources = sorted(set(sources) - SUPPORTED_SOURCES)
+    if unknown_sources:
+        raise ValueError(f"unknown discovery source(s): {', '.join(unknown_sources)}")
+    if not sources:
+        raise ValueError("at least one discovery source is required")
+
     merged: dict[str, DiscoveryTarget] = {}
 
-    async def add_many(items: list[dict[str, Any]]) -> None:
+    def add_many(items: list[dict[str, Any]]) -> None:
         for item in items:
             norm = _normalize_url(item.get("url", ""))
             if not norm:
@@ -249,7 +250,7 @@ async def discover_targets(
         provider_key = name.lower().replace(" ", "_")
         try:
             items = await discovery
-            await add_many(items)
+            add_many(items)
             status = "ok"
             error_type = None
             if name == "BuiltWith" and not os.getenv("BUILTWITH_API_KEY"):
@@ -261,7 +262,7 @@ async def discover_targets(
                     "candidates": len(items),
                     "error_type": error_type,
                 }
-        except Exception as exc:  # noqa: BLE001 - third-party provider boundary
+        except Exception as exc:
             # Provider exceptions may contain signed URLs or API credentials.
             error_type = type(exc).__name__
             if provider_status is not None:
@@ -280,24 +281,29 @@ async def discover_targets(
                 },
             )
 
+    jobs: list[Awaitable[None]] = []
     if "shodan" in sources:
-        await add_source("Shodan", _discover_shodan(max_per_source))
+        jobs.append(add_source("Shodan", _discover_shodan(max_per_source)))
     if "commoncrawl" in sources:
-        await add_source(
-            "Common Crawl",
-            commoncrawl_source.discover_targets(max_results=max_per_source),
+        jobs.append(
+            add_source(
+                "Common Crawl",
+                commoncrawl_source.discover_targets(max_results=max_per_source),
+            )
         )
     if "builtwith" in sources:
-        await add_source(
-            "BuiltWith",
-            builtwith_source.discover_targets(max_results=max_per_source),
+        jobs.append(
+            add_source(
+                "BuiltWith",
+                builtwith_source.discover_targets(max_results=max_per_source),
+            )
         )
+    await asyncio.gather(*jobs)
     return merged
 
 
 async def _scan_batch(batch: list[DiscoveryTarget]) -> list[ScanResult]:
-    tasks = [scan(item.url) for item in batch]
-    return await asyncio.gather(*tasks, return_exceptions=False)
+    return await scan_urls((target.url for target in batch), scan, logger)
 
 
 async def run_discovery_scan(
@@ -313,47 +319,9 @@ async def run_discovery_scan(
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     RESULTS_DIR.mkdir(exist_ok=True)
-    run_id = new_id("discovery")
-    operation_token = bind_operation(run_id)
-    started_at = utc_now()
-    started = time.perf_counter()
-    provider_status: dict[str, dict[str, Any]] = {}
-    candidate_count = 0
-    scanned = 0
-    found_creds = 0
-    found_findings = 0
-
-    def persist_status(status: str, error_type: str | None = None) -> None:
-        payload = {
-            "run_id": run_id,
-            "status": status,
-            "started_at": started_at,
-            "finished_at": None if status == "running" else utc_now(),
-            "duration_ms": (
-                None
-                if status == "running"
-                else round((time.perf_counter() - started) * 1000, 2)
-            ),
-            "sources": sources,
-            "providers": provider_status,
-            "candidates": candidate_count,
-            "scanned": scanned,
-            "public_configs": found_creds,
-            "findings": found_findings,
-            "error_type": error_type,
-        }
-        try:
-            write_status_file(DISCOVERY_STATUS_FILE, payload)
-        except OSError as exc:
-            logger.warning(
-                "Unable to write discovery status",
-                extra={
-                    "event": "status_write_failed",
-                    "error_type": type(exc).__name__,
-                },
-            )
-
-    persist_status("running")
+    state = DiscoveryRunState(sources=sources)
+    operation_token = bind_operation(state.run_id)
+    state.persist(DISCOVERY_STATUS_FILE, "running")
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     if findings_output is None:
         findings_output = RESULTS_DIR / f"findings_{ts}.jsonl"
@@ -370,9 +338,9 @@ async def run_discovery_scan(
         },
     )
     try:
-        targets = await discover_targets(sources, max_per_source, provider_status)
+        targets = await discover_targets(sources, max_per_source, state.providers)
         target_list = list(targets.values())
-        candidate_count = len(target_list)
+        state.candidates = len(target_list)
         logger.info(
             "Discovery candidates collected",
             extra={"event": "candidates_collected", "candidates": len(target_list)},
@@ -380,8 +348,8 @@ async def run_discovery_scan(
 
         outcome = _run_outcome(
             active_scan=active_scan,
-            candidate_count=candidate_count,
-            provider_status=provider_status,
+            candidate_count=state.candidates,
+            provider_status=state.providers,
         )
         if outcome in {"failed", "disabled"}:
             raise DiscoveryProvidersUnavailable(
@@ -390,14 +358,14 @@ async def run_discovery_scan(
 
         if not active_scan:
             for target in target_list:
-                _append_jsonl(inventory_output, _serialize_candidate(target))
-            persist_status(outcome)
+                append_jsonl(inventory_output, _serialize_candidate(target))
+            state.persist(DISCOVERY_STATUS_FILE, outcome)
             logger.info(
                 "Passive discovery completed",
                 extra={
                     "event": "passive_discovery_completed",
                     "status": outcome,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "duration_ms": state.elapsed_ms(),
                     "candidates": len(target_list),
                 },
             )
@@ -407,44 +375,44 @@ async def run_discovery_scan(
             batch = target_list[i : i + batch_size]
             results = await _scan_batch(batch)
             for target, result in zip(batch, results, strict=True):
-                scanned += 1
+                state.scanned += 1
                 if result.found_credentials:
-                    found_creds += 1
+                    state.public_configs += 1
                 if result.has_reportable_findings:
-                    found_findings += 1
+                    state.findings += 1
                 record = _serialize_result(result, target)
-                _append_jsonl(inventory_output, record)
+                append_jsonl(inventory_output, record)
                 if result.has_reportable_findings:
-                    _append_jsonl(findings_output, record)
+                    append_jsonl(findings_output, record)
             logger.info(
                 "Discovery batch completed",
                 extra={
                     "event": "discovery_progress",
-                    "scanned": scanned,
+                    "scanned": state.scanned,
                     "candidates": len(target_list),
-                    "public_configs": found_creds,
-                    "findings": found_findings,
+                    "public_configs": state.public_configs,
+                    "findings": state.findings,
                 },
             )
 
-        persist_status(outcome)
+        state.persist(DISCOVERY_STATUS_FILE, outcome)
         logger.info(
             "Discovery run completed",
             extra={
                 "event": "discovery_completed",
                 "status": outcome,
-                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "duration_ms": state.elapsed_ms(),
                 "candidates": len(target_list),
-                "scanned": scanned,
-                "public_configs": found_creds,
-                "findings": found_findings,
+                "scanned": state.scanned,
+                "public_configs": state.public_configs,
+                "findings": state.findings,
             },
         )
         return findings_output, inventory_output
     except Exception as exc:
         error_type = type(exc).__name__
         record_error("discovery", error_type, "discovery_failed")
-        persist_status("failed", error_type)
+        state.persist(DISCOVERY_STATUS_FILE, "failed", error_type)
         logger.exception(
             "Discovery run failed",
             extra={"event": "discovery_failed", "error_type": error_type},

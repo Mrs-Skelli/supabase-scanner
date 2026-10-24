@@ -14,6 +14,12 @@ ruff check .
 pytest
 ```
 
+Keep module boundaries intact: passive fingerprint parsing belongs in
+`fingerprints.py`, network access checks in `supabase_probe.py`, orchestration in
+`scanner.py`, and persisted JSONL shape changes in `finding_records.py`. New
+discovery-only behavior must include a regression test proving that the target
+scanner is never called.
+
 ## Evidence safety
 
 - Keep masked, bounded evidence as the default.

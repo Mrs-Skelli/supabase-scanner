@@ -2,7 +2,7 @@ import base64
 import json
 import socket
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -14,9 +14,11 @@ from scanner import (
     _coalesce_sensitive_key_exposures,
     _extract_js_urls,
     _extract_table_names_from_js,
+    _fetch,
     _find_client_config,
     _find_credentials,
     _parse_content_range,
+    _probe_credentials,
     _source_label,
 )
 from ssrf_guard import validate_url
@@ -62,6 +64,17 @@ class ScannerParsingTests(unittest.TestCase):
             ],
         )
 
+    def test_javascript_url_extraction_deduplicates_repeated_assets(self):
+        html = """
+        <script src="/assets/app.js"></script>
+        <link rel="modulepreload" href="/assets/app.js">
+        """
+
+        self.assertEqual(
+            _extract_js_urls(html, "https://example.test"),
+            ["https://example.test/assets/app.js"],
+        )
+
     def test_ssrf_guard_rejects_embedded_credentials_before_dns(self):
         self.assertEqual(
             validate_url("https://user:password@example.test/path"),
@@ -102,6 +115,17 @@ class ScannerParsingTests(unittest.TestCase):
         self.assertEqual(len(credentials), 1)
         self.assertEqual(credentials[0].project_id, "project-ref")
         self.assertEqual(credentials[0].anon_key, self.publishable_key)
+
+    def test_alternative_hosted_domain_uses_project_reference(self):
+        source = (
+            'const url = "https://project-ref.supabase.in";'
+            f'const key = "{self.publishable_key}";'
+        )
+
+        with patch("scanner.validate_url", return_value=None):
+            credentials = _find_credentials(source, "fixture.js")
+
+        self.assertEqual(credentials[0].project_id, "project-ref")
 
     def test_create_client_pair_recognizes_custom_domain(self):
         source = (
@@ -326,6 +350,50 @@ class TableCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.error, "request failed (ConnectError)")
         self.assertNotIn("sensitive", result.error)
+
+    async def test_fetch_revalidates_redirect_before_following(self):
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("scanner.validate_url", side_effect=[None, "blocked"]):
+                body = await _fetch(client, "https://example.test")
+
+        self.assertIsNone(body)
+        self.assertEqual(calls, 1)
+
+    async def test_authenticated_token_is_used_only_for_access_checks(self):
+        with (
+            patch(
+                "scanner.discover_table_names",
+                AsyncMock(return_value=["profiles"]),
+            ) as discover,
+            patch("scanner.check_tables", AsyncMock(return_value=[])) as check,
+        ):
+            async with httpx.AsyncClient() as client:
+                await _probe_credentials(
+                    client,
+                    [self.credential],
+                    {"profiles"},
+                    "user-access-token",
+                )
+
+        discover.assert_awaited_once_with(
+            client,
+            self.credential,
+            {"profiles"},
+            None,
+        )
+        check.assert_awaited_once_with(
+            client,
+            self.credential,
+            ["profiles"],
+            "user-access-token",
+        )
 
 
 if __name__ == "__main__":

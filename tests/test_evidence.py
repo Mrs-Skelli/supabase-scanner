@@ -2,7 +2,6 @@ import base64
 import json
 import os
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from discovery import DiscoveryTarget
@@ -76,7 +75,7 @@ class EvidenceMaskingTests(unittest.TestCase):
         self.assertEqual(config.sample_limit, 3)
 
     def test_discovery_defaults_to_masked_storage(self):
-        table = SimpleNamespace(
+        table = TableResult(
             name="profiles",
             row_count=1,
             sample_columns=["email"],
@@ -84,14 +83,10 @@ class EvidenceMaskingTests(unittest.TestCase):
             error=None,
             sample_data=[{"email": "analyst@example.test"}],
         )
-        result = SimpleNamespace(
+        result = ScanResult(
             target_url="https://example.test",
-            vulnerable_tables=[table],
             tables_checked=[table],
-            error=None,
-            auth_mode="anon",
             js_files_scanned=1,
-            credentials=[],
         )
 
         with patch.dict(os.environ, {}, clear=True):
@@ -107,7 +102,7 @@ class EvidenceMaskingTests(unittest.TestCase):
         )
 
     def test_discovery_raw_mode_is_explicit_and_still_redacts_tokens(self):
-        table = SimpleNamespace(
+        table = TableResult(
             name="profiles",
             row_count=1,
             sample_columns=["email", "api_key"],
@@ -120,14 +115,10 @@ class EvidenceMaskingTests(unittest.TestCase):
                 }
             ],
         )
-        result = SimpleNamespace(
+        result = ScanResult(
             target_url="https://example.test",
-            vulnerable_tables=[table],
             tables_checked=[table],
-            error=None,
-            auth_mode="anon",
             js_files_scanned=1,
-            credentials=[],
         )
 
         with patch.dict(os.environ, {"RAW_EVIDENCE_ENABLED": "true"}, clear=True):

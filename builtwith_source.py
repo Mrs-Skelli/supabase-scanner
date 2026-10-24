@@ -9,8 +9,12 @@ BUILTWITH_LISTS_URL = "https://api.builtwith.com/lists12/api.json"
 DEFAULT_TECH = os.environ.get("BUILTWITH_TECH", "Supabase")
 
 
-def _normalize_domain(domain: str) -> str | None:
-    if not domain:
+class BuiltWithUnavailable(RuntimeError):
+    """Raised when BuiltWith cannot return its first result page."""
+
+
+def _normalize_domain(domain: object) -> str | None:
+    if not isinstance(domain, str) or not domain:
         return None
     domain = domain.strip().lower()
     if "://" in domain:
@@ -51,7 +55,24 @@ async def discover_targets(
                 payload = resp.json()
             except (httpx.HTTPError, ValueError) as exc:
                 # Request URLs contain the API key in their query string.
-                logger.warning("BuiltWith request failed: %s", type(exc).__name__)
+                logger.warning(
+                    "BuiltWith request failed",
+                    extra={
+                        "event": "builtwith_request_failed",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                if not results:
+                    raise BuiltWithUnavailable(
+                        "BuiltWith request unavailable"
+                    ) from None
+                break
+
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("Results", []), list
+            ):
+                if not results:
+                    raise BuiltWithUnavailable("BuiltWith returned an invalid payload")
                 break
 
             for item in payload.get("Results", []):

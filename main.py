@@ -24,6 +24,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from finding_store import load_latest_findings, matches_query, summarize_finding
 from masking import EvidenceConfig, credential_preview, prepare_sample_data
 from observability import (
     bind_operation,
@@ -38,7 +39,8 @@ from observability import (
     reset_request,
     runtime_snapshot,
 )
-from scanner import ScanResult, scan
+from scan_models import ScanResult
+from scanner import scan
 
 limiter = Limiter(key_func=get_remote_address)
 BASE_DIR = Path(__file__).resolve().parent
@@ -60,7 +62,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Supabase RLS Scanner",
-    description="Security research tool for identifying exposed Supabase data",
+    description="Security research tool for reviewing Supabase access evidence",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -283,7 +285,7 @@ async def diagnostics_page():
 @limiter.limit("10/minute")
 async def api_scan(request: Request, body: ScanRequest):
     """
-    Scan a URL for exposed Supabase credentials and disabled RLS.
+    Scan a URL for public Supabase client config and bounded access evidence.
     Rate limited to 10 scans/minute per IP.
     """
     operation_id = new_id("scan")
@@ -421,82 +423,23 @@ def _record_for_view(rec: dict, raw_requested: bool) -> tuple[dict, str, bool]:
 
 
 def _load_findings() -> list[dict]:
-    """All vulnerable findings, de-duped by target (latest scan wins)."""
-    latest: dict[str, dict] = {}
-    for path in RESULTS_DIR.glob("findings_*.jsonl"):
-        try:
-            with path.open(encoding="utf-8") as findings_file:
-                for line_number, line in enumerate(findings_file, start=1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Ignoring malformed JSONL record in %s at line %d",
-                            path,
-                            line_number,
-                        )
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    tgt = rec.get("target")
-                    if not tgt:
-                        continue
-                    prev = latest.get(tgt)
-                    if not prev or rec.get("timestamp", "") >= prev.get(
-                        "timestamp", ""
-                    ):
-                        latest[tgt] = rec
-        except OSError as exc:
-            logger.warning("Unable to read findings file %s: %s", path, exc)
-            continue
-    out = list(latest.values())
-    out.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
-    return out
-
-
-def _summarize(rec: dict) -> dict:
-    vt = rec.get("vulnerable_tables", []) or []
-    return {
-        "target": rec.get("target"),
-        "timestamp": rec.get("timestamp"),
-        "sources": rec.get("sources", []),
-        "discovery_confidence": rec.get("discovery_confidence", "unknown"),
-        "credential_count": len(rec.get("credentials", []) or []),
-        "sensitive_key_exposure_count": sum(
-            item.get("occurrence_count", 0)
-            for item in rec.get("sensitive_key_exposures", []) or []
-        ),
-        "vulnerable_table_count": len(vt),
-        "total_rows_exposed": sum((t.get("row_count") or 0) for t in vt),
-        "tables": [t.get("name") for t in vt],
-    }
+    """All reportable findings, de-duplicated by target."""
+    return load_latest_findings(RESULTS_DIR)
 
 
 @app.get("/api/findings")
 async def list_findings(q: str | None = None, limit: int = 50, offset: int = 0):
-    """Paginated summaries of vulnerable targets. Optional substring filter `q`."""
+    """Paginated reportable findings with an optional substring filter."""
     findings = _load_findings()
     if q:
-        ql = q.lower()
-        findings = [
-            r
-            for r in findings
-            if ql in (r.get("target", "").lower())
-            or any(
-                ql in (t.get("name", "").lower())
-                for t in r.get("vulnerable_tables", [])
-            )
-        ]
+        findings = [record for record in findings if matches_query(record, q)]
     total = len(findings)
     page = findings[offset : offset + max(1, min(limit, 200))]
     payload = {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "results": [_summarize(r) for r in page],
+        "results": [summarize_finding(record) for record in page],
     }
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 

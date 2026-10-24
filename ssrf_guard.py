@@ -17,7 +17,6 @@ References:
 
 import ipaddress
 import logging
-import re
 import socket
 from urllib.parse import urlparse
 
@@ -72,13 +71,6 @@ _BLOCKED_HOSTNAMES = frozenset(
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 MAX_REDIRECTS = 5
-
-# Regex for redacting private IPs from error messages returned to users
-_PRIVATE_IP_RE = re.compile(
-    r"\b(?:127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+"
-    r"|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+"
-    r"|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)\b"
-)
 
 
 def _is_private_ip(ip_str: str) -> bool:
@@ -168,12 +160,3 @@ def validate_url(url: str) -> str | None:
         return result
 
     return None
-
-
-def sanitize_error(error_msg: str) -> str:
-    """Strip internal IP addresses from error messages returned to users.
-
-    OWASP: "Do not send raw responses to the client" — prevent leaking
-    internal network topology through error messages.
-    """
-    return _PRIVATE_IP_RE.sub("[redacted-ip]", error_msg)
