@@ -8,6 +8,12 @@ services:
       - SHODAN_API_KEY=${SHODAN_API_KEY}
       - RAW_EVIDENCE_ENABLED=${RAW_EVIDENCE_ENABLED:-false}
       - RAW_EVIDENCE_SAMPLE_LIMIT=${RAW_EVIDENCE_SAMPLE_LIMIT:-1}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_TO_FILE=${LOG_TO_FILE:-true}
+      - LOG_DIR=/app/results/logs
+      - LOG_MAX_BYTES=${LOG_MAX_BYTES:-5242880}
+      - LOG_BACKUP_COUNT=${LOG_BACKUP_COUNT:-5}
     volumes:
       - ./results:/app/results
     networks:

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,9 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
+        provider_status = {}
         with (
+            patch.dict(os.environ, {}, clear=True),
             patch(
                 "discovery._discover_shodan",
                 AsyncMock(return_value=shodan_result),
@@ -32,10 +35,15 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value=[]),
             ),
         ):
-            targets = await discover_targets(["shodan", "commoncrawl", "builtwith"], 10)
+            targets = await discover_targets(
+                ["shodan", "commoncrawl", "builtwith"], 10, provider_status
+            )
 
         self.assertEqual(list(targets), ["https://example.test"])
         self.assertEqual(targets["https://example.test"].sources, {"shodan"})
+        self.assertEqual(provider_status["shodan"]["status"], "ok")
+        self.assertEqual(provider_status["common_crawl"]["status"], "error")
+        self.assertEqual(provider_status["builtwith"]["status"], "disabled")
 
     async def test_sensitive_key_only_result_is_written_as_a_finding(self):
         raw_secret = "sb_secret_" + "s" * 32
@@ -55,12 +63,14 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             findings = Path(temp_dir) / "findings.jsonl"
             inventory = Path(temp_dir) / "inventory.jsonl"
+            status_file = Path(temp_dir) / "discovery-status.json"
             with (
                 patch(
                     "discovery.discover_targets",
                     AsyncMock(return_value={target.url: target}),
                 ),
                 patch("discovery._scan_batch", AsyncMock(return_value=[result])),
+                patch("discovery.DISCOVERY_STATUS_FILE", status_file),
             ):
                 await run_discovery_scan(
                     ["shodan"],
@@ -71,12 +81,17 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             record = json.loads(findings.read_text())
+            status = json.loads(status_file.read_text())
 
         self.assertEqual(record["status"], "finding")
         self.assertEqual(record["finding_count"], 1)
         self.assertEqual(record["sensitive_key_exposure_count"], 1)
         self.assertEqual(record["vulnerable_tables"], [])
         self.assertNotIn(raw_secret, json.dumps(record))
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["candidates"], 1)
+        self.assertEqual(status["scanned"], 1)
+        self.assertEqual(status["findings"], 1)
 
 
 if __name__ == "__main__":

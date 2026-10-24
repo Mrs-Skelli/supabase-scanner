@@ -14,6 +14,7 @@ from pathlib import Path
 import shodan
 
 from masking import EvidenceConfig, credential_preview, prepare_sample_data
+from observability import configure_logging
 from scanner import ScanResult, scan
 
 logger = logging.getLogger(__name__)
@@ -215,20 +216,21 @@ async def run_shodan_scan(
             if result.found_credentials:
                 found_creds += 1
                 logger.info(
-                    "[PUBLIC CONFIG] %s — project: %s",
-                    result.target_url,
-                    result.credentials[0].project_id,
+                    "Public Supabase configuration detected",
+                    extra={"event": "public_config_detected"},
                 )
             if result.has_reportable_findings:
                 found_findings += 1
                 logger.warning(
-                    "[FINDING] %s — %d readable tables, %d sensitive key exposures",
-                    result.target_url,
-                    len(result.vulnerable_tables),
-                    sum(
-                        exposure.occurrence_count
-                        for exposure in result.sensitive_key_exposures
-                    ),
+                    "Reportable finding detected",
+                    extra={
+                        "event": "finding_detected",
+                        "readable_tables": len(result.vulnerable_tables),
+                        "sensitive_key_exposures": sum(
+                            exposure.occurrence_count
+                            for exposure in result.sensitive_key_exposures
+                        ),
+                    },
                 )
                 _save_finding(result, output_path)
 
@@ -247,10 +249,7 @@ async def run_shodan_scan(
 if __name__ == "__main__":
     import argparse
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    configure_logging("shodan", Path(__file__).resolve().parent)
 
     parser = argparse.ArgumentParser(description="Shodan-powered Supabase RLS scanner")
     parser.add_argument("--query", default=SHODAN_QUERY, help="Shodan search query")

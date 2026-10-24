@@ -107,7 +107,7 @@ def resolve_and_validate(hostname: str, port: int | None = None) -> list[str] | 
             socket.IPPROTO_TCP,
         )
     except socket.gaierror:
-        logger.debug("DNS resolution failed for %s", hostname)
+        logger.debug("DNS resolution failed", extra={"event": "dns_failed"})
         return "DNS resolution failed"
 
     if not results:

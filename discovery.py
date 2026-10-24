@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import time
 from collections import defaultdict
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
@@ -15,6 +17,15 @@ import shodan
 import builtwith_source
 import commoncrawl_source
 from masking import EvidenceConfig, credential_preview, prepare_sample_data
+from observability import (
+    bind_operation,
+    configure_logging,
+    new_id,
+    record_error,
+    reset_operation,
+    utc_now,
+    write_status_file,
+)
 from scanner import ScanResult, scan
 from shodan_scanner import (
     RESULTS_DIR,
@@ -24,6 +35,7 @@ from shodan_scanner import (
 )
 
 logger = logging.getLogger(__name__)
+DISCOVERY_STATUS_FILE = RESULTS_DIR / "diagnostics" / "discovery-status.json"
 
 
 class ShodanDiscoveryUnavailable(RuntimeError):
@@ -153,7 +165,9 @@ async def _discover_shodan(max_results: int) -> list[dict[str, Any]]:
 
 
 async def discover_targets(
-    sources: list[str], max_per_source: int
+    sources: list[str],
+    max_per_source: int,
+    provider_status: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, DiscoveryTarget]:
     merged: dict[str, DiscoveryTarget] = {}
 
@@ -170,11 +184,39 @@ async def discover_targets(
 
     async def add_source(name: str, discovery: Awaitable[list[dict[str, Any]]]) -> None:
         """Keep one unavailable provider from aborting the complete run."""
+        provider_key = name.lower().replace(" ", "_")
         try:
-            await add_many(await discovery)
+            items = await discovery
+            await add_many(items)
+            status = "ok"
+            error_type = None
+            if name == "BuiltWith" and not os.getenv("BUILTWITH_API_KEY"):
+                status = "disabled"
+                error_type = "MissingConfiguration"
+            if provider_status is not None:
+                provider_status[provider_key] = {
+                    "status": status,
+                    "candidates": len(items),
+                    "error_type": error_type,
+                }
         except Exception as exc:  # noqa: BLE001 - third-party provider boundary
             # Provider exceptions may contain signed URLs or API credentials.
-            logger.warning("%s discovery unavailable: %s", name, type(exc).__name__)
+            error_type = type(exc).__name__
+            if provider_status is not None:
+                provider_status[provider_key] = {
+                    "status": "error",
+                    "candidates": 0,
+                    "error_type": error_type,
+                }
+            record_error("discovery", error_type, "provider_unavailable")
+            logger.warning(
+                "Discovery provider unavailable",
+                extra={
+                    "event": "provider_unavailable",
+                    "provider": provider_key,
+                    "error_type": error_type,
+                },
+            )
 
     if "shodan" in sources:
         await add_source("Shodan", _discover_shodan(max_per_source))
@@ -208,56 +250,125 @@ async def run_discovery_scan(
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     RESULTS_DIR.mkdir(exist_ok=True)
+    run_id = new_id("discovery")
+    operation_token = bind_operation(run_id)
+    started_at = utc_now()
+    started = time.perf_counter()
+    provider_status: dict[str, dict[str, Any]] = {}
+    candidate_count = 0
+    scanned = 0
+    found_creds = 0
+    found_findings = 0
+
+    def persist_status(status: str, error_type: str | None = None) -> None:
+        payload = {
+            "run_id": run_id,
+            "status": status,
+            "started_at": started_at,
+            "finished_at": None if status == "running" else utc_now(),
+            "duration_ms": (
+                None
+                if status == "running"
+                else round((time.perf_counter() - started) * 1000, 2)
+            ),
+            "sources": sources,
+            "providers": provider_status,
+            "candidates": candidate_count,
+            "scanned": scanned,
+            "public_configs": found_creds,
+            "findings": found_findings,
+            "error_type": error_type,
+        }
+        try:
+            write_status_file(DISCOVERY_STATUS_FILE, payload)
+        except OSError as exc:
+            logger.warning(
+                "Unable to write discovery status",
+                extra={
+                    "event": "status_write_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+    persist_status("running")
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     if findings_output is None:
         findings_output = RESULTS_DIR / f"findings_{ts}.jsonl"
     if inventory_output is None:
         inventory_output = RESULTS_DIR / f"inventory_{ts}.jsonl"
 
-    targets = await discover_targets(sources, max_per_source)
     logger.info(
-        "Discovered %d unique targets across sources: %s",
-        len(targets),
-        ", ".join(sources),
+        "Discovery run started",
+        extra={
+            "event": "discovery_started",
+            "source_count": len(sources),
+            "max_per_source": max_per_source,
+            "batch_size": batch_size,
+        },
     )
-
-    scanned = 0
-    found_creds = 0
-    found_findings = 0
-    target_list = list(targets.values())
-    for i in range(0, len(target_list), batch_size):
-        batch = target_list[i : i + batch_size]
-        results = await _scan_batch(batch)
-        for target, result in zip(batch, results, strict=True):
-            scanned += 1
-            if result.found_credentials:
-                found_creds += 1
-            if result.has_reportable_findings:
-                found_findings += 1
-            record = _serialize_result(result, target)
-            _append_jsonl(inventory_output, record)
-            if result.has_reportable_findings:
-                _append_jsonl(findings_output, record)
+    try:
+        targets = await discover_targets(sources, max_per_source, provider_status)
+        target_list = list(targets.values())
+        candidate_count = len(target_list)
         logger.info(
-            "Progress: %d/%d scanned | %d with public config | %d with findings",
-            scanned,
-            len(target_list),
-            found_creds,
-            found_findings,
+            "Discovery candidates collected",
+            extra={"event": "candidates_collected", "candidates": len(target_list)},
         )
 
-    logger.info(
-        "Discovery scan complete. Findings: %s | Inventory: %s",
-        findings_output,
-        inventory_output,
-    )
-    return findings_output, inventory_output
+        for i in range(0, len(target_list), batch_size):
+            batch = target_list[i : i + batch_size]
+            results = await _scan_batch(batch)
+            for target, result in zip(batch, results, strict=True):
+                scanned += 1
+                if result.found_credentials:
+                    found_creds += 1
+                if result.has_reportable_findings:
+                    found_findings += 1
+                record = _serialize_result(result, target)
+                _append_jsonl(inventory_output, record)
+                if result.has_reportable_findings:
+                    _append_jsonl(findings_output, record)
+            logger.info(
+                "Discovery batch completed",
+                extra={
+                    "event": "discovery_progress",
+                    "scanned": scanned,
+                    "candidates": len(target_list),
+                    "public_configs": found_creds,
+                    "findings": found_findings,
+                },
+            )
+
+        status = "completed" if target_list else "empty"
+        persist_status(status)
+        logger.info(
+            "Discovery run completed",
+            extra={
+                "event": "discovery_completed",
+                "status": status,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "candidates": len(target_list),
+                "scanned": scanned,
+                "public_configs": found_creds,
+                "findings": found_findings,
+            },
+        )
+        return findings_output, inventory_output
+    except Exception as exc:
+        error_type = type(exc).__name__
+        record_error("discovery", error_type, "discovery_failed")
+        persist_status("failed", error_type)
+        logger.exception(
+            "Discovery run failed",
+            extra={"event": "discovery_failed", "error_type": error_type},
+        )
+        raise
+    finally:
+        reset_operation(operation_token)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    configure_logging("discovery", Path(__file__).resolve().parent)
     parser = argparse.ArgumentParser(description="Unified Supabase discovery runner")
     parser.add_argument(
         "--sources",

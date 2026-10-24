@@ -39,6 +39,8 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 - Rate limiting (10 scans/min per IP)
 - Docker + nginx config ready for self-hosting
 - Findings saved as JSONL for easy processing
+- Structured rotating logs, correlation IDs, provider status, and an
+  access-controlled diagnostics view
 - Privileged `sb_secret_` and legacy service-role keys are never used, returned,
   logged, or persisted. Findings retain only type, count, source, and a short
   one-way correlation fingerprint so analysts can identify the exposure safely.
@@ -183,6 +185,34 @@ curl -X POST https://research.example.com/api/scan \
 `vulnerable_table_count` and the older `rls_likely_disabled` table field remain
 for API compatibility. They mean that the request returned rows; they do not,
 by themselves, prove RLS is disabled or that the access is unintended.
+
+## Diagnostics and debugging
+
+Open `/diagnostics` on the same access-controlled deployment to see service
+uptime, request/scan counters, recent error classes, and the latest discovery
+provider status. `GET /api/diagnostics` returns the same derived state with
+`Cache-Control: no-store`.
+
+Application logs are JSON Lines by default and rotate at 5 MiB with five
+backups:
+
+- `results/logs/api.log`
+- `results/logs/discovery.log`
+- `results/logs/shodan.log`
+- `results/shodan_cron.log` for the cron wrapper
+
+Every API response includes `X-Request-ID`; scan and discovery log entries also
+carry an operation ID. Use those IDs to correlate failures without searching
+for target data. Set `LOG_LEVEL=DEBUG` temporarily for deeper transport and
+request-flow diagnostics. `LOG_FORMAT=text` is available for interactive use,
+and `LOG_TO_FILE=false` keeps logs on stderr/journald only.
+
+Messages are filtered for JWTs, Supabase keys, authorization headers, and
+common token query parameters. Tracebacks retain stack locations and exception
+types but omit exception values. Logs deliberately omit target identities,
+table names, response bodies, samples, raw credentials, and auth tokens. Keep
+the diagnostics route behind the same reverse-proxy authentication as the
+findings browser.
 
 ## Development
 

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Supabase Scanner Diagnostics</title>
+  <style>
+    :root{--bg:#070b12;--panel:#0d1420;--line:#26364a;--text:#d8e6f3;--muted:#7f94aa;--green:#53e3a6;--yellow:#ffd166;--red:#ff6b6b}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}.bar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+    h1{font-size:20px;margin:0;color:var(--green)}a,button{color:var(--text);background:transparent;border:1px solid var(--line);padding:7px 10px;text-decoration:none;cursor:pointer}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}.panel{background:var(--panel);border:1px solid var(--line);padding:14px}
+    h2{font-size:13px;color:var(--muted);text-transform:uppercase;margin:0 0 12px}.row{display:flex;justify-content:space-between;gap:18px;border-top:1px solid #172536;padding:7px 0}
+    .row:first-of-type{border-top:0}.key{color:var(--muted)}.ok{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}
+    table{width:100%;border-collapse:collapse}th,td{text-align:left;border-top:1px solid #172536;padding:7px;word-break:break-word}th{color:var(--muted)}
+    .wide{grid-column:1/-1}.note{color:var(--muted);margin:8px 0 18px;line-height:1.5}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar"><h1>▚ Scanner Diagnostics</h1><button id="refresh">refresh</button><a href="./">scanner</a><a href="browse">findings</a></div>
+  <p class="note">Derived operational metadata only. Keys, samples, response bodies, and raw target URLs are never shown here.</p>
+  <div id="content" class="grid"><div class="panel">loading…</div></div>
+</div>
+<script>
+const esc=v=>String(v??"—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const rows=o=>Object.entries(o||{}).map(([k,v])=>`<div class="row"><span class="key">${esc(k)}</span><span>${esc(v)}</span></div>`).join("")||'<div class="row"><span class="key">none</span><span>—</span></div>';
+async function load(){
+  const el=document.getElementById("content");
+  try{
+    const response=await fetch("api/diagnostics",{cache:"no-store"});
+    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    const d=await response.json(), discovery=d.latest_discovery||{};
+    const errors=d.recent_errors||[], providers=discovery.providers||{};
+    el.innerHTML=`
+      <section class="panel"><h2>service</h2>${rows({status:"healthy",started_at:d.started_at,uptime_seconds:d.uptime_seconds,log_level:d.log_level,request_id:response.headers.get("x-request-id")})}</section>
+      <section class="panel"><h2>evidence controls</h2>${rows(d.evidence)}</section>
+      <section class="panel"><h2>storage</h2>${rows(d.storage)}</section>
+      <section class="panel"><h2>runtime counters</h2>${rows(d.counters)}</section>
+      <section class="panel wide"><h2>latest discovery</h2>${rows({run_id:discovery.run_id,status:discovery.status,started_at:discovery.started_at,finished_at:discovery.finished_at,duration_ms:discovery.duration_ms,candidates:discovery.candidates,scanned:discovery.scanned,public_configs:discovery.public_configs,findings:discovery.findings,error_type:discovery.error_type})}</section>
+      <section class="panel wide"><h2>provider status</h2><table><thead><tr><th>provider</th><th>status</th><th>candidates</th><th>error type</th></tr></thead><tbody>${Object.entries(providers).map(([name,p])=>`<tr><td>${esc(name)}</td><td>${esc(p.status)}</td><td>${esc(p.candidates)}</td><td>${esc(p.error_type)}</td></tr>`).join("")||'<tr><td colspan="4">no discovery status yet</td></tr>'}</tbody></table></section>
+      <section class="panel wide"><h2>recent errors</h2><table><thead><tr><th>time</th><th>component</th><th>event</th><th>type</th><th>correlation</th></tr></thead><tbody>${errors.map(e=>`<tr><td>${esc(e.timestamp)}</td><td>${esc(e.component)}</td><td>${esc(e.event)}</td><td>${esc(e.error_type)}</td><td>${esc(e.operation_id!=="-"?e.operation_id:e.request_id)}</td></tr>`).join("")||'<tr><td colspan="5">no in-process errors recorded</td></tr>'}</tbody></table></section>`;
+  }catch(error){el.innerHTML=`<div class="panel bad">diagnostics unavailable: ${esc(error.message)}</div>`}
+}
+document.getElementById("refresh").addEventListener("click",load);load();
+</script>
+</body>
+</html>

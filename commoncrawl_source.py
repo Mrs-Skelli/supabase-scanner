@@ -66,7 +66,11 @@ async def _query_index(
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         logger.warning(
-            "Common Crawl query failed for %s %s: %s", index_api, pattern, exc
+            "Common Crawl query failed",
+            extra={
+                "event": "commoncrawl_query_failed",
+                "error_type": type(exc).__name__,
+            },
         )
         return []
 

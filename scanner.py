@@ -228,7 +228,7 @@ async def _fetch(
     if _ssrf_check:
         err = validate_url(url)
         if err:
-            logger.warning("SSRF blocked request to %s (%s)", _source_label(url), err)
+            logger.warning("SSRF blocked request", extra={"event": "ssrf_blocked"})
             return None
     try:
         # Manual redirect following with SSRF validation on each hop
@@ -248,9 +248,8 @@ async def _fetch(
                 err = validate_url(current_url)
                 if err:
                     logger.warning(
-                        "SSRF blocked redirect to %s (%s)",
-                        _source_label(current_url),
-                        err,
+                        "SSRF blocked redirect",
+                        extra={"event": "ssrf_redirect_blocked"},
                     )
                     return None
                 continue
@@ -259,10 +258,13 @@ async def _fetch(
                     return None
                 return resp.text
             return None
-        logger.debug("Too many redirects for %s", _source_label(url))
+        logger.debug("Too many redirects", extra={"event": "redirect_limit"})
         return None
     except httpx.HTTPError as exc:
-        logger.debug("Failed to fetch %s: %s", _source_label(url), type(exc).__name__)
+        logger.debug(
+            "Fetch failed",
+            extra={"event": "fetch_failed", "error_type": type(exc).__name__},
+        )
     return None
 
 
@@ -491,10 +493,16 @@ async def _get_table_names_openapi(
                 if p != "/" and "rpc" not in p and "{" not in p
             ]
             if tables:
-                logger.info("OpenAPI: %d tables for %s", len(tables), cred.project_id)
+                logger.info(
+                    "OpenAPI table discovery completed",
+                    extra={"event": "openapi_tables", "tables": len(tables)},
+                )
                 return tables
     except (httpx.HTTPError, ValueError) as exc:
-        logger.debug("OpenAPI failed for %s: %s", cred.project_id, exc)
+        logger.debug(
+            "OpenAPI discovery failed",
+            extra={"event": "openapi_failed", "error_type": type(exc).__name__},
+        )
     return None
 
 
@@ -534,14 +542,15 @@ async def _get_table_names_graphql(
                 tables.append(table)
         if tables:
             logger.info(
-                "GraphQL introspection: %d tables for %s: %s",
-                len(tables),
-                cred.project_id,
-                tables,
+                "GraphQL table discovery completed",
+                extra={"event": "graphql_tables", "tables": len(tables)},
             )
             return tables
     except (httpx.HTTPError, ValueError) as exc:
-        logger.debug("GraphQL introspection failed for %s: %s", cred.project_id, exc)
+        logger.debug(
+            "GraphQL introspection failed",
+            extra={"event": "graphql_failed", "error_type": type(exc).__name__},
+        )
     return None
 
 
@@ -571,7 +580,13 @@ async def _verify_tables_exist(
                 if r.status_code in (200, 206):
                     return name
             except httpx.HTTPError as exc:
-                logger.debug("Table probe failed for %s: %s", name, exc)
+                logger.debug(
+                    "Table probe failed",
+                    extra={
+                        "event": "table_probe_failed",
+                        "error_type": type(exc).__name__,
+                    },
+                )
             return None
 
     results = await asyncio.gather(*[_probe(n) for n in candidates])
@@ -608,16 +623,20 @@ async def _get_table_names(
             candidates.append(name)
 
     logger.info(
-        "Discovery schemas locked for %s; probing %d candidates "
-        "(%d from JS, %d common)",
-        cred.project_id,
-        len(candidates),
-        len(js_extracted_tables),
-        len(candidates) - len(js_extracted_tables),
+        "Discovery schemas locked; probing table candidates",
+        extra={
+            "event": "table_probe_started",
+            "candidates": len(candidates),
+            "js_candidates": len(js_extracted_tables),
+            "common_candidates": len(candidates) - len(js_extracted_tables),
+        },
     )
 
     found = await _verify_tables_exist(client, cred, candidates, auth_token)
-    logger.info("Found %d tables for %s: %s", len(found), cred.project_id, found)
+    logger.info(
+        "Table probe completed",
+        extra={"event": "table_probe_completed", "tables": len(found)},
+    )
     return found
 
 
@@ -687,7 +706,10 @@ async def _check_table_rls(
             error=f"HTTP {resp.status_code}",
         )
     except (httpx.HTTPError, ValueError) as exc:
-        logger.debug("Table check failed for %s: %s", table, exc)
+        logger.debug(
+            "Table check failed",
+            extra={"event": "table_check_failed", "error_type": type(exc).__name__},
+        )
         return TableResult(
             name=table,
             row_count=None,
@@ -731,7 +753,10 @@ async def _refresh_auth_token(
                 return token
         logger.debug("Token refresh failed with HTTP %d", resp.status_code)
     except (httpx.HTTPError, ValueError) as exc:
-        logger.debug("Token refresh error: %s", exc)
+        logger.debug(
+            "Token refresh error",
+            extra={"event": "token_refresh_failed", "error_type": type(exc).__name__},
+        )
     return None
 
 
@@ -797,7 +822,8 @@ async def scan(
 
         if js_tables:
             logger.info(
-                "Extracted %d table names from JS: %s", len(js_tables), js_tables
+                "Extracted table names from JavaScript",
+                extra={"event": "js_tables_extracted", "tables": len(js_tables)},
             )
 
         if not result.credentials:

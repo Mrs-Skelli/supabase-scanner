@@ -10,10 +10,10 @@ import copy
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,24 +25,37 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from masking import EvidenceConfig, credential_preview, prepare_sample_data
-from scanner import ScanResult, scan
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+from observability import (
+    bind_operation,
+    bind_request,
+    configure_logging,
+    increment_counter,
+    new_id,
+    normalize_request_id,
+    read_status_file,
+    record_error,
+    reset_operation,
+    reset_request,
+    runtime_snapshot,
 )
-logger = logging.getLogger(__name__)
+from scanner import ScanResult, scan
 
 limiter = Limiter(key_func=get_remote_address)
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = Path(os.getenv("RESULTS_DIR", BASE_DIR / "results"))
+DISCOVERY_STATUS_FILE = RESULTS_DIR / "diagnostics" / "discovery-status.json"
+LOG_FILE = configure_logging("api", BASE_DIR)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Supabase RLS Scanner starting up")
+    logger.info(
+        "API service starting",
+        extra={"event": "service_start", "log_file_enabled": LOG_FILE is not None},
+    )
     yield
-    logger.info("Supabase RLS Scanner shutting down")
+    logger.info("API service stopping", extra={"event": "service_stop"})
 
 
 app = FastAPI(
@@ -54,6 +67,50 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = normalize_request_id(request.headers.get("x-request-id"))
+    token = bind_request(request_id)
+    started = time.perf_counter()
+    increment_counter("http_requests_total")
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as exc:
+        record_error("api", type(exc).__name__, "unhandled_request")
+        logger.exception(
+            "Unhandled request error",
+            extra={
+                "event": "unhandled_request",
+                "method": request.method,
+                "path": request.url.path,
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+    finally:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        if status_code >= 500:
+            increment_counter("http_5xx_total")
+        elif status_code >= 400:
+            increment_counter("http_4xx_total")
+        logger.debug(
+            "Request completed",
+            extra={
+                "event": "request_completed",
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        reset_request(token)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,13 +130,6 @@ def _clean_token(value: str | None) -> str | None:
     if cleaned.lower().startswith("bearer "):
         cleaned = cleaned[7:].strip()
     return cleaned or None
-
-
-def _target_for_log(value: str) -> str:
-    try:
-        return urlparse(value).hostname or "[invalid-host]"
-    except ValueError:
-        return "[invalid-host]"
 
 
 def _decode_auth_blob(value: str) -> tuple[str | None, str | None]:
@@ -224,6 +274,11 @@ async def browse():
     return (BASE_DIR / "static" / "browse.html").read_text(encoding="utf-8")
 
 
+@app.get("/diagnostics", response_class=HTMLResponse)
+async def diagnostics_page():
+    return (BASE_DIR / "static" / "diagnostics.html").read_text(encoding="utf-8")
+
+
 @app.post("/api/scan", response_model=ScanResponse)
 @limiter.limit("10/minute")
 async def api_scan(request: Request, body: ScanRequest):
@@ -231,10 +286,17 @@ async def api_scan(request: Request, body: ScanRequest):
     Scan a URL for exposed Supabase credentials and disabled RLS.
     Rate limited to 10 scans/minute per IP.
     """
+    operation_id = new_id("scan")
+    operation_token = bind_operation(operation_id)
+    started = time.perf_counter()
+    increment_counter("scans_started_total")
     logger.info(
-        "Scan requested for host %s (from %s)",
-        _target_for_log(body.url),
-        get_remote_address(request),
+        "Scan started",
+        extra={
+            "event": "scan_started",
+            "auth_mode": "authenticated" if body.auth_token else "anon",
+            "raw_evidence_requested": body.raw_evidence,
+        },
     )
     try:
         result = await asyncio.wait_for(
@@ -246,19 +308,82 @@ async def api_scan(request: Request, body: ScanRequest):
             timeout=60,
         )
     except TimeoutError:
+        increment_counter("scans_timed_out_total")
+        record_error("scanner", "TimeoutError", "scan_timeout")
+        logger.warning(
+            "Scan timed out",
+            extra={"event": "scan_timeout"},
+        )
         raise HTTPException(
             status_code=504, detail="Scan timed out after 60 seconds"
         ) from None
     except Exception as exc:
-        logger.exception("Scan error for host %s", _target_for_log(body.url))
+        increment_counter("scans_failed_total")
+        record_error("scanner", type(exc).__name__, "scan_failed")
+        logger.exception(
+            "Scan failed",
+            extra={
+                "event": "scan_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
         raise HTTPException(status_code=500, detail="Internal scan error") from exc
-
-    return _serialize_result(result, raw_requested=body.raw_evidence)
+    else:
+        increment_counter("scans_completed_total")
+        if result.error:
+            increment_counter("scans_completed_with_error_total")
+        logger.info(
+            "Scan completed",
+            extra={
+                "event": "scan_completed",
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "js_files_scanned": result.js_files_scanned,
+                "public_configs": len(result.credentials),
+                "tables_checked": len(result.tables_checked),
+                "readable_tables": len(result.vulnerable_tables),
+                "sensitive_key_exposures": sum(
+                    item.occurrence_count for item in result.sensitive_key_exposures
+                ),
+                "result_error": bool(result.error),
+            },
+        )
+        return _serialize_result(result, raw_requested=body.raw_evidence)
+    finally:
+        reset_operation(operation_token)
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/diagnostics")
+async def diagnostics():
+    """Derived operational state only; the reverse proxy protects this route."""
+    evidence = EvidenceConfig.from_environment()
+    payload = runtime_snapshot()
+    payload.update(
+        {
+            "service": "supabase-scanner",
+            "evidence": {
+                "raw_enabled": evidence.raw_values,
+                "sample_limit": evidence.sample_limit,
+            },
+            "storage": {
+                "unique_findings": len(_load_findings()),
+                "log_file_enabled": LOG_FILE is not None,
+            },
+            "latest_discovery": read_status_file(DISCOVERY_STATUS_FILE),
+        }
+    )
+    return JSONResponse(
+        payload,
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 # ── Findings browser ────────────────────────────────────────────────────────
