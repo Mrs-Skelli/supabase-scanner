@@ -90,9 +90,7 @@ def _is_private_ip(ip_str: str) -> bool:
     return any(addr in net for net in _BLOCKED_NETS)
 
 
-def resolve_and_validate(
-    hostname: str, port: int | None = None
-) -> list[str] | str | None:
+def resolve_and_validate(hostname: str, port: int | None = None) -> list[str] | str:
     """
     Resolve hostname via DNS, validate all returned IPs.
 
@@ -109,14 +107,11 @@ def resolve_and_validate(
             socket.IPPROTO_TCP,
         )
     except socket.gaierror:
-        # DNS failure is NOT a security block — if a domain can't resolve,
-        # it can't reach internal services. Let httpx handle the error
-        # naturally so the user gets a proper "failed to fetch" message.
-        logger.debug("DNS resolution failed for %s (not a security block)", hostname)
-        return None  # pass through
+        logger.debug("DNS resolution failed for %s", hostname)
+        return "DNS resolution failed"
 
     if not results:
-        return None  # no results = can't reach anything = safe
+        return "DNS resolution returned no addresses"
 
     safe_ips: list[str] = []
     for _family, _type, _proto, _canon, sockaddr in results:

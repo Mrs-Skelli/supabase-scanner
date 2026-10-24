@@ -133,6 +133,13 @@ class CredentialResponse(BaseModel):
     source_file: str
 
 
+class SensitiveKeyExposureResponse(BaseModel):
+    key_type: str
+    occurrence_count: int
+    source_file: str
+    fingerprint: str
+
+
 class TableResponse(BaseModel):
     name: str
     row_count: int | None
@@ -147,6 +154,7 @@ class ScanResponse(BaseModel):
     found_credentials: bool
     js_files_scanned: int
     credentials: list[CredentialResponse]
+    sensitive_key_exposures: list[SensitiveKeyExposureResponse]
     tables_checked: list[TableResponse]
     vulnerable_table_count: int
     auth_mode: str
@@ -189,6 +197,15 @@ def _serialize_result(result: ScanResult, raw_requested: bool = False) -> ScanRe
         found_credentials=result.found_credentials,
         js_files_scanned=result.js_files_scanned,
         credentials=creds,
+        sensitive_key_exposures=[
+            SensitiveKeyExposureResponse(
+                key_type=exposure.key_type,
+                occurrence_count=exposure.occurrence_count,
+                source_file=exposure.source_file,
+                fingerprint=exposure.fingerprint,
+            )
+            for exposure in result.sensitive_key_exposures
+        ],
         tables_checked=tables,
         vulnerable_table_count=len(result.vulnerable_tables),
         auth_mode=result.auth_mode,
@@ -322,6 +339,10 @@ def _summarize(rec: dict) -> dict:
         "timestamp": rec.get("timestamp"),
         "sources": rec.get("sources", []),
         "credential_count": len(rec.get("credentials", []) or []),
+        "sensitive_key_exposure_count": sum(
+            item.get("occurrence_count", 0)
+            for item in rec.get("sensitive_key_exposures", []) or []
+        ),
         "vulnerable_table_count": len(vt),
         "total_rows_exposed": sum((t.get("row_count") or 0) for t in vt),
         "tables": [t.get("name") for t in vt],
@@ -371,6 +392,7 @@ async def finding_detail(target: str, raw: bool = False):
                 "timestamp": rendered.get("timestamp"),
                 "sources": rendered.get("sources", []),
                 "credentials": creds,
+                "sensitive_key_exposures": rendered.get("sensitive_key_exposures", []),
                 "vulnerable_tables": rendered.get("vulnerable_tables", []),
                 "evidence_mode": evidence_mode,
                 "raw_available": raw_available,

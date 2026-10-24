@@ -18,6 +18,11 @@ from scanner import ScanResult, scan
 
 logger = logging.getLogger(__name__)
 
+
+class ShodanSourceUnavailable(RuntimeError):
+    """Raised when Shodan cannot return any first-page search results."""
+
+
 # Shodan search query that finds pages referencing Supabase
 # Multiple queries for maximum Supabase coverage
 SHODAN_QUERIES = [
@@ -46,41 +51,38 @@ def _iter_shodan_targets(api: shodan.Shodan, query: str, max_results: int):
     Falls back to search_cursor if available.
     """
     count = 0
-    try:
-        # Free tier: use paginated search (100 results per page)
-        page = 1
-        while count < max_results:
-            try:
-                results = api.search(query, page=page)
-            except shodan.APIError as exc:
-                if page == 1:
-                    logger.error("Shodan search error: %s", exc)
+    page = 1
+    while count < max_results:
+        try:
+            results = api.search(query, page=page)
+        except shodan.APIError:
+            if page == 1:
+                raise
+            logger.warning("Shodan pagination stopped: APIError")
+            break
+
+        matches = results.get("matches", [])
+        if not matches:
+            break
+
+        for banner in matches:
+            if count >= max_results:
                 break
+            ip = banner.get("ip_str", "")
+            port = banner.get("port", 443)
+            hostnames = banner.get("hostnames", [])
+            http_host = banner.get("http", {}).get("host", "")
 
-            matches = results.get("matches", [])
-            if not matches:
-                break
+            host = http_host or (hostnames[0] if hostnames else ip)
+            scheme = "https" if port in (443, 8443) else "http"
+            url = f"{scheme}://{host}"
+            if port not in (80, 443, 8080, 8443):
+                url += f":{port}"
 
-            for banner in matches:
-                if count >= max_results:
-                    break
-                ip = banner.get("ip_str", "")
-                port = banner.get("port", 443)
-                hostnames = banner.get("hostnames", [])
-                http_host = banner.get("http", {}).get("host", "")
+            yield url
+            count += 1
 
-                host = http_host or (hostnames[0] if hostnames else ip)
-                scheme = "https" if port in (443, 8443) else "http"
-                url = f"{scheme}://{host}"
-                if port not in (80, 443, 8080, 8443):
-                    url += f":{port}"
-
-                yield url
-                count += 1
-
-            page += 1
-    except shodan.APIError as exc:
-        logger.error("Shodan API error: %s", exc)
+        page += 1
 
 
 async def _scan_batch(urls: list[str]) -> list[ScanResult]:
@@ -90,13 +92,18 @@ async def _scan_batch(urls: list[str]) -> list[ScanResult]:
 
 
 def _save_finding(result: ScanResult, output_file: Path) -> None:
-    """Append a vulnerable finding to the JSONL output file."""
+    """Append independently reportable, safely serialized evidence."""
     evidence = EvidenceConfig.from_environment()
+    sensitive_key_exposure_count = sum(
+        exposure.occurrence_count for exposure in result.sensitive_key_exposures
+    )
     record = {
         "timestamp": datetime.now(UTC).isoformat(),
         "target": result.target_url,
         "masked": not evidence.raw_values,
         "sample_mode": ("raw_secrets_redacted" if evidence.raw_values else "masked"),
+        "finding_count": len(result.vulnerable_tables) + sensitive_key_exposure_count,
+        "sensitive_key_exposure_count": sensitive_key_exposure_count,
         "credentials": [
             {
                 "supabase_url": c.supabase_url,
@@ -105,6 +112,15 @@ def _save_finding(result: ScanResult, output_file: Path) -> None:
                 "source_file": c.source_file,
             }
             for c in result.credentials
+        ],
+        "sensitive_key_exposures": [
+            {
+                "key_type": exposure.key_type,
+                "occurrence_count": exposure.occurrence_count,
+                "source_file": exposure.source_file,
+                "fingerprint": exposure.fingerprint,
+            }
+            for exposure in result.sensitive_key_exposures
         ],
         "vulnerable_tables": [
             {
@@ -161,13 +177,14 @@ async def run_shodan_scan(
             info["total"],
             total,
         )
-    except shodan.APIError as exc:
-        logger.error("Shodan count failed: %s", exc)
-        return
+    except shodan.APIError:
+        logger.error("Shodan count failed: APIError")
+        raise ShodanSourceUnavailable("Shodan count request failed") from None
 
     # Run all queries and deduplicate URLs
     all_urls = []
     seen = set()
+    failed_queries = 0
     queries = SHODAN_QUERIES if query == SHODAN_QUERIES[0] else [query]
     for q in queries:
         try:
@@ -175,8 +192,11 @@ async def run_shodan_scan(
                 if url not in seen:
                     seen.add(url)
                     all_urls.append(url)
-        except shodan.APIError as exc:
-            logger.warning("Query failed '%s': %s", q, exc)
+        except shodan.APIError:
+            failed_queries += 1
+            logger.warning("Shodan query failed: APIError")
+    if failed_queries == len(queries) and not all_urls:
+        raise ShodanSourceUnavailable("all Shodan search queries failed")
     urls = all_urls[:max_results]
     logger.info(
         "Collected %d unique URLs from %d Shodan queries", len(urls), len(queries)
@@ -184,7 +204,7 @@ async def run_shodan_scan(
 
     scanned = 0
     found_creds = 0
-    found_vuln = 0
+    found_findings = 0
 
     for i in range(0, len(urls), batch_size):
         batch = urls[i : i + batch_size]
@@ -195,26 +215,29 @@ async def run_shodan_scan(
             if result.found_credentials:
                 found_creds += 1
                 logger.info(
-                    "[CREDS] %s — project: %s",
+                    "[PUBLIC CONFIG] %s — project: %s",
                     result.target_url,
                     result.credentials[0].project_id,
                 )
-            if result.vulnerable_tables:
-                found_vuln += 1
+            if result.has_reportable_findings:
+                found_findings += 1
                 logger.warning(
-                    "[VULN] %s — %d tables exposed: %s",
+                    "[FINDING] %s — %d readable tables, %d sensitive key exposures",
                     result.target_url,
                     len(result.vulnerable_tables),
-                    [t.name for t in result.vulnerable_tables],
+                    sum(
+                        exposure.occurrence_count
+                        for exposure in result.sensitive_key_exposures
+                    ),
                 )
                 _save_finding(result, output_path)
 
         logger.info(
-            "Progress: %d/%d scanned | %d with creds | %d vulnerable",
+            "Progress: %d/%d scanned | %d with public config | %d with findings",
             scanned,
             len(urls),
             found_creds,
-            found_vuln,
+            found_findings,
         )
 
     logger.info("Scan complete. Findings saved to %s", output_path)

@@ -26,6 +26,10 @@ from shodan_scanner import (
 logger = logging.getLogger(__name__)
 
 
+class ShodanDiscoveryUnavailable(RuntimeError):
+    """Raised when every Shodan query fails before returning candidates."""
+
+
 @dataclass
 class DiscoveryTarget:
     url: str
@@ -46,7 +50,12 @@ def _normalize_url(url: str) -> str | None:
 
 def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, Any]:
     evidence = EvidenceConfig.from_environment()
-    status = "vulnerable" if result.vulnerable_tables else "clean"
+    sensitive_key_exposures = getattr(result, "sensitive_key_exposures", [])
+    sensitive_key_exposure_count = sum(
+        exposure.occurrence_count for exposure in sensitive_key_exposures
+    )
+    finding_count = len(result.vulnerable_tables) + sensitive_key_exposure_count
+    status = "finding" if finding_count else "clean"
     if result.error:
         status = "error"
     return {
@@ -56,6 +65,8 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
         "masked": not evidence.raw_values,
         "sample_mode": ("raw_secrets_redacted" if evidence.raw_values else "masked"),
         "auth_mode": result.auth_mode,
+        "finding_count": finding_count,
+        "sensitive_key_exposure_count": sensitive_key_exposure_count,
         "js_files_scanned": result.js_files_scanned,
         "error": result.error,
         "sources": sorted(target.sources),
@@ -68,6 +79,15 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
                 "source_file": c.source_file,
             }
             for c in result.credentials
+        ],
+        "sensitive_key_exposures": [
+            {
+                "key_type": exposure.key_type,
+                "occurrence_count": exposure.occurrence_count,
+                "source_file": exposure.source_file,
+                "fingerprint": exposure.fingerprint,
+            }
+            for exposure in sensitive_key_exposures
         ],
         "tables_checked": [
             {
@@ -110,6 +130,7 @@ async def _discover_shodan(max_results: int) -> list[dict[str, Any]]:
     api = _shodan_client()
     seen = set()
     results = []
+    failed_queries = 0
     per_query = max(1, max_results // max(1, len(SHODAN_QUERIES)))
     for query in SHODAN_QUERIES:
         try:
@@ -123,8 +144,11 @@ async def _discover_shodan(max_results: int) -> list[dict[str, Any]]:
                 )
                 if len(results) >= max_results:
                     return results
-        except shodan.APIError as exc:
-            logger.warning("Shodan discovery failed for %s: %s", query, exc)
+        except shodan.APIError:
+            failed_queries += 1
+            logger.warning("Shodan discovery query unavailable: APIError")
+    if failed_queries == len(SHODAN_QUERIES) and not results:
+        raise ShodanDiscoveryUnavailable("all Shodan queries failed")
     return results
 
 
@@ -199,7 +223,7 @@ async def run_discovery_scan(
 
     scanned = 0
     found_creds = 0
-    found_vuln = 0
+    found_findings = 0
     target_list = list(targets.values())
     for i in range(0, len(target_list), batch_size):
         batch = target_list[i : i + batch_size]
@@ -208,18 +232,18 @@ async def run_discovery_scan(
             scanned += 1
             if result.found_credentials:
                 found_creds += 1
-            if result.vulnerable_tables:
-                found_vuln += 1
+            if result.has_reportable_findings:
+                found_findings += 1
             record = _serialize_result(result, target)
             _append_jsonl(inventory_output, record)
-            if result.vulnerable_tables:
+            if result.has_reportable_findings:
                 _append_jsonl(findings_output, record)
         logger.info(
-            "Progress: %d/%d scanned | %d with creds | %d vulnerable",
+            "Progress: %d/%d scanned | %d with public config | %d with findings",
             scanned,
             len(target_list),
             found_creds,
-            found_vuln,
+            found_findings,
         )
 
     logger.info(

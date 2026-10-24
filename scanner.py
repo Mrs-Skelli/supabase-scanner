@@ -1,15 +1,17 @@
 """
-Core Supabase credential and RLS scanner.
-Fetches a target URL, extracts JS, finds Supabase credentials,
-then probes the REST API to identify tables with RLS disabled.
+Core Supabase client-configuration and access scanner.
+Fetches a target URL, extracts JavaScript, finds Supabase configuration,
+then probes the REST API for tables that return rows in the selected mode.
 """
 
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -163,7 +165,7 @@ class Credential:
 
 @dataclass
 class TableResult:
-    """Result of checking a single table for RLS."""
+    """Result of checking a single table with the selected credentials."""
 
     name: str
     row_count: int | None
@@ -173,10 +175,21 @@ class TableResult:
     sample_data: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class SensitiveKeyExposure:
+    """Non-reusable metadata for privileged key material found client-side."""
+
+    key_type: str
+    occurrence_count: int
+    source_file: str
+    fingerprint: str
+
+
 @dataclass
 class ScanResult:
     target_url: str
     credentials: list[Credential] = field(default_factory=list)
+    sensitive_key_exposures: list[SensitiveKeyExposure] = field(default_factory=list)
     tables_checked: list[TableResult] = field(default_factory=list)
     js_files_scanned: int = 0
     auth_mode: str = "anon"
@@ -188,7 +201,13 @@ class ScanResult:
 
     @property
     def vulnerable_tables(self) -> list[TableResult]:
+        """Compatibility alias for tables that returned rows."""
         return [t for t in self.tables_checked if t.rls_likely_disabled]
+
+    @property
+    def has_reportable_findings(self) -> bool:
+        """Return whether the result contains independently reportable evidence."""
+        return bool(self.vulnerable_tables or self.sensitive_key_exposures)
 
 
 def _source_label(url: str) -> str:
@@ -342,7 +361,50 @@ def _is_public_client_key(key: str) -> bool:
         return bool(PUBLIC_KEY_RE.fullmatch(key))
     if not PUBLIC_KEY_RE.fullmatch(key):
         return False
-    return _legacy_jwt_role(key) not in {"service_role", "supabase_admin"}
+    return _legacy_jwt_role(key) == "anon"
+
+
+def _key_fingerprint(value: str) -> str:
+    """Return a short correlation fingerprint that cannot recover the key."""
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
+def _sensitive_key_exposures(text: str, source: str) -> list[SensitiveKeyExposure]:
+    detected: Counter[tuple[str, str]] = Counter()
+    for value in SECRET_KEY_RE.findall(text):
+        detected[("sb_secret", _key_fingerprint(value))] += 1
+    for value in PUBLIC_KEY_RE.findall(text):
+        role = _legacy_jwt_role(value)
+        if role in {"service_role", "supabase_admin"}:
+            detected[(f"legacy_{role}", _key_fingerprint(value))] += 1
+    return [
+        SensitiveKeyExposure(
+            key_type=key_type,
+            occurrence_count=count,
+            source_file=source,
+            fingerprint=fingerprint,
+        )
+        for (key_type, fingerprint), count in sorted(detected.items())
+    ]
+
+
+def _coalesce_sensitive_key_exposures(
+    exposures: list[SensitiveKeyExposure],
+) -> list[SensitiveKeyExposure]:
+    totals: Counter[tuple[str, str, str]] = Counter()
+    for exposure in exposures:
+        totals[(exposure.key_type, exposure.fingerprint, exposure.source_file)] += (
+            exposure.occurrence_count
+        )
+    return [
+        SensitiveKeyExposure(
+            key_type=key_type,
+            occurrence_count=count,
+            source_file=source_file,
+            fingerprint=fingerprint,
+        )
+        for (key_type, fingerprint, source_file), count in sorted(totals.items())
+    ]
 
 
 def _credential_from_pair(url: str, key: str, source: str) -> Credential | None:
@@ -360,16 +422,11 @@ def _credential_from_pair(url: str, key: str, source: str) -> Credential | None:
     )
 
 
-def _find_credentials(text: str, source: str) -> list[Credential]:
+def _find_client_config(
+    text: str, source: str
+) -> tuple[list[Credential], list[SensitiveKeyExposure]]:
     pairs: set[tuple[str, str]] = set()
-
-    secret_count = len(SECRET_KEY_RE.findall(text))
-    if secret_count:
-        logger.warning(
-            "Ignoring %d secret Supabase key value(s) found in %s",
-            secret_count,
-            source,
-        )
+    exposures = _sensitive_key_exposures(text, source)
 
     # createClient(url, key) is the strongest signal and supports custom or
     # self-hosted deployments without treating arbitrary URLs as Supabase.
@@ -396,16 +453,25 @@ def _find_credentials(text: str, source: str) -> list[Credential]:
         credential = _credential_from_pair(url, key, source)
         if credential:
             credentials.append(credential)
+    return credentials, exposures
+
+
+def _find_credentials(text: str, source: str) -> list[Credential]:
+    """Compatibility wrapper returning only safe public client credentials."""
+    credentials, _ = _find_client_config(text, source)
     return credentials
 
 
 def _build_headers(cred: Credential, auth_token: str | None = None) -> dict:
-    bearer = auth_token if auth_token else cred.anon_key
-    return {
+    headers = {
         **HEADERS,
         "apikey": cred.anon_key,
-        "Authorization": f"Bearer {bearer}",
     }
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    elif _legacy_jwt_role(cred.anon_key) == "anon":
+        headers["Authorization"] = f"Bearer {cred.anon_key}"
+    return headers
 
 
 async def _get_table_names_openapi(
@@ -713,14 +779,21 @@ async def scan(
 
         # Extract credentials AND table names from all JS sources
         seen_credentials: set[tuple[str, str]] = set()
+        detected_exposures: list[SensitiveKeyExposure] = []
         js_tables: set[str] = set()
         for text, source in all_text_sources:
-            for cred in _find_credentials(text, source):
+            credentials, exposures = _find_client_config(text, source)
+            for cred in credentials:
                 identity = (cred.project_id, cred.anon_key)
                 if identity not in seen_credentials:
                     seen_credentials.add(identity)
                     result.credentials.append(cred)
+            for exposure in exposures:
+                detected_exposures.append(exposure)
             js_tables |= _extract_table_names_from_js(text)
+        result.sensitive_key_exposures = _coalesce_sensitive_key_exposures(
+            detected_exposures
+        )
 
         if js_tables:
             logger.info(

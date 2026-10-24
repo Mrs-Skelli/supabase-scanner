@@ -39,8 +39,9 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 - Rate limiting (10 scans/min per IP)
 - Docker + nginx config ready for self-hosting
 - Findings saved as JSONL for easy processing
-- `sb_secret_` values are recognized only to exclude them; they are never used,
-  returned by the API, or written to findings
+- Privileged `sb_secret_` and legacy service-role keys are never used, returned,
+  logged, or persisted. Findings retain only type, count, source, and a short
+  one-way correlation fingerprint so analysts can identify the exposure safely.
 
 ---
 
@@ -104,8 +105,8 @@ The app binds to `127.0.0.1:8000` only — nginx is the public entry point.
 Requires a [Shodan](https://shodan.io) API key with enough credits for search cursors.
 
 ```bash
-# Set your key
-export SHODAN_API_KEY=your_key_here
+# Put SHODAN_API_KEY in the untracked .env file
+cp .env.example .env
 
 # Run a scan (defaults: up to 1000 results, 10 concurrent)
 python shodan_scanner.py
@@ -117,11 +118,19 @@ python shodan_scanner.py --max 5000 --batch 20 --output results/run1.jsonl
 python shodan_scanner.py --query 'http.html:"supabase.co" http.html:"eyJhbGciOiJIUzI1NiIs"'
 ```
 
-Findings are saved as JSONL in `results/` — one JSON object per vulnerable target.
+`shodan_cron.sh` uses paths relative to the repository and safely parses simple
+`KEY=VALUE` entries from `.env` without executing the file. Its interpreter,
+output directory, source list, provider cap, and batch size can be overridden
+with `PYTHON_BIN`, `RESULTS_DIR`, `DISCOVERY_SOURCES`, `MAX_PER_SOURCE`, and
+`SCAN_BATCH_SIZE`. A provider run that produces no current inventory exits
+non-zero rather than reusing an older file.
+
+Findings are saved as JSONL in `results/` — one JSON object per target with an
+anonymously readable table or a detected privileged-key exposure.
 
 Sample values are masked by default. For an access-controlled analyst
 deployment, set `RAW_EVIDENCE_ENABLED=true` to retain and display a maximum of
-one bounded raw row per exposed table. Credential-shaped fields and token
+one bounded raw row per readable table. Credential-shaped fields and token
 values remain redacted. `RAW_EVIDENCE_SAMPLE_LIMIT` may be set from 1 to 3;
 values outside that range are clamped. The findings browser still starts in
 masked mode and requires an explicit per-session action to reveal raw samples.
@@ -136,8 +145,11 @@ after credentials are removed.
 {
   "timestamp": "2026-04-16T10:00:00",
   "target": "https://example.com",
+  "status": "finding",
+  "finding_count": 1,
   "credentials": [{ "supabase_url": "...", "project_id": "...", "anon_key_preview": "..." }],
-  "vulnerable_tables": [{ "name": "users", "row_count": 5, "sample_columns": ["id", "email"] }]
+  "sensitive_key_exposures": [],
+  "vulnerable_tables": [{ "name": "public_profiles", "row_count": 5, "sample_columns": ["id", "display_name"] }]
 }
 ```
 
@@ -160,12 +172,17 @@ curl -X POST https://research.example.com/api/scan \
   "found_credentials": true,
   "js_files_scanned": 12,
   "credentials": [...],
+  "sensitive_key_exposures": [...],
   "tables_checked": [...],
   "vulnerable_table_count": 2,
   "evidence_mode": "masked",
   "error": null
 }
 ```
+
+`vulnerable_table_count` and the older `rls_likely_disabled` table field remain
+for API compatibility. They mean that the request returned rows; they do not,
+by themselves, prove RLS is disabled or that the access is unintended.
 
 ## Development
 
@@ -188,7 +205,7 @@ If you find a vulnerable site:
 
 1. **Don't access more data than needed** to confirm the issue exists
 2. **Find a security contact** — check for `security.txt`, a bug bounty program, or a general contact email
-3. **Report clearly** — include the Supabase project URL, which tables are exposed, and what type of data is accessible
+3. **Report clearly** — include the Supabase project URL, which tables are readable, what type of data is accessible, and why the access appears unintended
 4. **Give them time** — standard practice is 30–90 days before publishing
 5. **Follow up** — if no response after 2 weeks, try another contact
 

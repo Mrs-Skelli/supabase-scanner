@@ -64,7 +64,7 @@ th{color:var(--dblue);text-transform:uppercase;font-size:.74rem}
 <div class="wrap">
   <div class="bar">
     <h1>▚ Findings Browser</h1>
-    <span class="sub">exposed Supabase instances · RLS disabled</span>
+    <span class="sub">anonymously readable Supabase tables · review policy intent</span>
     <span class="mask-note" id="evidenceNote">🔒 masked by default</span>
     <button class="evidence-toggle" id="evidenceToggle" disabled>show raw sample</button>
     <a class="nav" href="./">← scanner</a>
@@ -96,7 +96,8 @@ function renderList(){
     <div class="tgt ${i===sel?'active':''}" data-i="${i}">
       <div class="host">${esc(f.target)}</div>
       <div class="meta">
-        <span class="pill red">${f.vulnerable_table_count} tables</span>
+        <span class="pill red">${f.vulnerable_table_count} readable tables</span>
+        ${f.sensitive_key_exposure_count?`<span class="pill red">${f.sensitive_key_exposure_count} sensitive key occurrence(s)</span>`:""}
         <span class="pill">${(f.total_rows_exposed||0).toLocaleString()} rows</span>
         <span class="pill">${(f.sources||[]).join(",")||"—"}</span>
       </div>
@@ -123,16 +124,20 @@ function renderDetail(){
   if(tab>=tables.length) tab=0;
   const t = tables[tab];
   const creds = (current.credentials||[]).map(c=>`<div class="c">↳ ${esc(c.supabase_url||c.project_id||"")} · key ${esc(c.anon_key_preview||c.anon_key||"")}</div>`).join("");
+  const sensitive = (current.sensitive_key_exposures||[]).map(e=>`<div class="c">↳ ${esc(e.key_type)} · ${e.occurrence_count} occurrence(s) · fingerprint ${esc(e.fingerprint)} · ${esc(e.source_file)}</div>`).join("");
+  const tableSection = tables.length
+    ? `<div class="tabs">${tables.map((tt,j)=>`<span class="tab ${j===tab?'active':''}" data-j="${j}">${esc(tt.name)} <span class="rc">${tt.row_count??'?'}</span></span>`).join("")}</div>${renderTable(t)}`
+    : `<div class="hint">No anonymously readable table evidence was recorded for this finding.</div>`;
   el.innerHTML = `
     <div class="navbtns">
       <button onclick="move(-1)">↑ prev</button>
       <button onclick="move(1)">next ↓</button>
     </div>
     <div class="dhost">${esc(current.target)}</div>
-    <div class="dmeta">scanned ${esc((current.timestamp||"").replace('T',' ').slice(0,19))} UTC · ${tables.length} vulnerable tables · sources: ${(current.sources||[]).join(", ")||"—"}</div>
-    ${creds?`<div class="creds"><b class="kv">exposed credentials</b>${creds}</div>`:""}
-    <div class="tabs">${tables.map((tt,j)=>`<span class="tab ${j===tab?'active':''}" data-j="${j}">${esc(tt.name)} <span class="rc">${tt.row_count??'?'}</span></span>`).join("")}</div>
-    ${renderTable(t)}
+    <div class="dmeta">scanned ${esc((current.timestamp||"").replace('T',' ').slice(0,19))} UTC · ${tables.length} anonymously readable tables · sources: ${(current.sources||[]).join(", ")||"—"}</div>
+    ${creds?`<div class="creds"><b class="kv">public client config</b>${creds}</div>`:""}
+    ${sensitive?`<div class="creds"><b class="kv">sensitive key exposure metadata</b>${sensitive}</div>`:""}
+    ${tableSection}
     <div class="hint">keys: ↑/↓ targets · ←/→ tables · ${current.evidence_mode==="raw"?'raw application values shown in <span class="raw-value">red</span>; secrets remain redacted':'masked values shown in <span class="masked">yellow</span>'}</div>`;
   [...el.querySelectorAll(".tab")].forEach(n=>n.onclick=()=>{tab=+n.dataset.j;renderDetail();});
 }
@@ -149,7 +154,7 @@ function renderTable(t){
     body = cols.map(c=>`<tr><td class="kv">${esc(c)}</td><td class="val" style="color:#555">— no sample stored —</td></tr>`).join("");
   } else { body = '<tr><td colspan="2" style="color:#555">no columns captured</td></tr>'; }
   return `
-    <div class="kv"><b>${esc(t.name)}</b> — row_count: <b>${t.row_count??'?'}</b>, RLS: <span style="color:var(--red)">likely disabled</span></div>
+    <div class="kv"><b>${esc(t.name)}</b> — row_count: <b>${t.row_count??'?'}</b>, anonymous read: <span style="color:var(--red)">returned rows</span> · intent requires review</div>
     <div class="cols">columns: ${cols.map(esc).join(", ")||"—"}</div>
     <table><thead><tr><th>column</th><th>${current.evidence_mode==="raw"?'raw sample value':'masked sample value'}</th></tr></thead><tbody>${body}</tbody></table>`;
 }

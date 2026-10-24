@@ -15,7 +15,7 @@ from masking import (
     credential_preview,
     prepare_sample_data,
 )
-from scanner import Credential, ScanResult, TableResult
+from scanner import Credential, ScanResult, TableResult, _find_client_config
 
 
 class EvidenceMaskingTests(unittest.TestCase):
@@ -164,6 +164,26 @@ class EvidenceMaskingTests(unittest.TestCase):
         self.assertNotIn("anon_key", stored)
         self.assertEqual(stored["anon_key_preview"], credential_preview(key))
         self.assertNotIn(key, json.dumps(record))
+
+    def test_sensitive_key_exposure_metadata_is_serialized_without_key_value(self):
+        raw_secret = "sb_secret_" + "s" * 32
+        _, exposures = _find_client_config(
+            f'const serverKey = "{raw_secret}";', "fixture.js"
+        )
+        result = ScanResult(
+            target_url="https://example.test",
+            sensitive_key_exposures=exposures,
+        )
+
+        api_payload = serialize_api(result).model_dump_json()
+        discovery_payload = json.dumps(
+            serialize_discovery(result, DiscoveryTarget("https://example.test"))
+        )
+
+        self.assertIn(exposures[0].fingerprint, api_payload)
+        self.assertIn(exposures[0].fingerprint, discovery_payload)
+        self.assertNotIn(raw_secret, api_payload)
+        self.assertNotIn(raw_secret, discovery_payload)
 
     def test_api_requires_explicit_raw_request_even_when_enabled(self):
         result = ScanResult(
