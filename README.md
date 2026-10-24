@@ -5,6 +5,9 @@ that return rows to an anonymous or explicitly supplied authenticated session.
 
 Built for responsible disclosure — find it, report it, get it fixed.
 
+[Changelog](CHANGELOG.md) · [Security policy](SECURITY.md) ·
+[Contributing](CONTRIBUTING.md)
+
 > [!IMPORTANT]
 > A readable table does **not** by itself prove that RLS is disabled or that the
 > data is unintentionally public. Supabase policies can deliberately grant
