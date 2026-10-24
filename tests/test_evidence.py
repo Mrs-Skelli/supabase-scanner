@@ -1,9 +1,10 @@
+import asyncio
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from discovery import DiscoveryTarget, _serialize_result
+from discovery import DiscoveryTarget, _serialize_result, discover_targets
 from main import _record_for_view
 from masking import SECRET_REDACTION, prepare_sample_data
 
@@ -138,6 +139,33 @@ class EvidenceMaskingTests(unittest.TestCase):
         self.assertFalse(available)
         self.assertEqual(mode, "masked")
         self.assertTrue(rendered["masked"])
+
+
+class DiscoveryResilienceTests(unittest.TestCase):
+    def test_one_failed_provider_does_not_discard_other_results(self):
+        shodan_result = [{
+            "url": "https://example.test/path",
+            "source": "shodan",
+            "metadata": {"query": "supabase"},
+        }]
+
+        with (
+            patch("discovery._discover_shodan", AsyncMock(return_value=shodan_result)),
+            patch(
+                "discovery.commoncrawl_source.discover_targets",
+                AsyncMock(side_effect=RuntimeError("temporary disconnect")),
+            ),
+            patch(
+                "discovery.builtwith_source.discover_targets",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            targets = asyncio.run(
+                discover_targets(["shodan", "commoncrawl", "builtwith"], 10)
+            )
+
+        self.assertEqual(list(targets), ["https://example.test"])
+        self.assertEqual(targets["https://example.test"].sources, {"shodan"})
 
 
 if __name__ == "__main__":

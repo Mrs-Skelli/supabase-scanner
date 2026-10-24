@@ -143,12 +143,27 @@ async def discover_targets(sources: list[str], max_per_source: int) -> dict[str,
             meta = item.get('metadata') or {}
             target.metadata[source].append(meta)
 
+    async def add_source(name: str, discovery) -> None:
+        """Keep one unavailable discovery provider from aborting the full run."""
+        try:
+            await add_many(await discovery)
+        except Exception as exc:
+            # Log only the exception class: provider errors can embed request URLs,
+            # including API credentials, in their string representation.
+            logger.warning('%s discovery unavailable: %s', name, type(exc).__name__)
+
     if 'shodan' in sources:
-        await add_many(await _discover_shodan(max_per_source))
+        await add_source('Shodan', _discover_shodan(max_per_source))
     if 'commoncrawl' in sources:
-        await add_many(await commoncrawl_source.discover_targets(max_results=max_per_source))
+        await add_source(
+            'Common Crawl',
+            commoncrawl_source.discover_targets(max_results=max_per_source),
+        )
     if 'builtwith' in sources:
-        await add_many(await builtwith_source.discover_targets(max_results=max_per_source))
+        await add_source(
+            'BuiltWith',
+            builtwith_source.discover_targets(max_results=max_per_source),
+        )
     return merged
 
 
