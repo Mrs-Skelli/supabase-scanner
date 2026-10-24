@@ -39,6 +39,8 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 - Web UI for one-off scans
 - REST API for programmatic use
 - Discovery adapters for Shodan, Common Crawl, BuiltWith, and URLScan
+- Optional Wayback Machine enrichment for historical HTML and JavaScript
+  fingerprints, kept separate from current-exposure findings
 - Passive discovery-only mode with provider pagination, retry/backoff, and
   de-duplicated, confidence-ranked candidate inventories
 - Modern environment-name, Realtime, Storage, Auth/JWKS, custom-domain, and
@@ -134,6 +136,22 @@ URLScan searches existing public scans and works with a small unauthenticated
 quota. Set `URLSCAN_API_KEY` for the account's larger search quota. The adapter
 does not submit URLs to URLScan and never requests discovered targets.
 
+Wayback enrichment is deliberately opt-in. It checks existing archived copies
+of candidates already found by another provider, inspects the archived page and
+up to five archived JavaScript files, and records only capture metadata,
+Supabase project references, key formats, and non-reusable privileged-key
+fingerprints. It never requests the live candidate or uses an archived key.
+Historical signals do not establish that an exposure still exists.
+
+```bash
+python discovery.py --discover-only --sources urlscan \
+  --wayback-enrich --wayback-max-targets 25 --wayback-max-assets 5
+```
+
+Keep the target and asset caps low. Internet Archive coverage can be incomplete,
+JavaScript captures may be missing, and the public APIs should be used with
+serial requests, caching, and backoff rather than bulk mirroring.
+
 `shodan_cron.sh` uses paths relative to the repository and safely parses simple
 `KEY=VALUE` entries from `.env` without executing the file. Its interpreter,
 output directory, source list, provider cap, and batch size can be overridden
@@ -142,6 +160,8 @@ with `PYTHON_BIN`, `RESULTS_DIR`, `DISCOVERY_SOURCES`, `MAX_PER_SOURCE`, and
 de-duplicated candidate inventory without probing discovered targets. A provider
 run that produces no current inventory exits non-zero rather than reusing an
 older file.
+Set `WAYBACK_ENRICH=true` to add the bounded historical pass; its target and
+asset caps are controlled by `WAYBACK_MAX_TARGETS` and `WAYBACK_MAX_ASSETS`.
 
 The fingerprint scanner recognizes documented browser configuration names such
 as `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and

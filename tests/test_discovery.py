@@ -195,6 +195,58 @@ class DiscoveryResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["candidates"], 1)
         self.assertEqual(status["scanned"], 0)
 
+    async def test_wayback_enrichment_is_historical_metadata_not_a_scan(self):
+        target = DiscoveryTarget("https://example.test", {"urlscan"})
+        historical = {
+            target.url: {
+                "status": "archived",
+                "historical_only": True,
+                "capture_timestamp": "20200102030405",
+                "confidence": "medium",
+                "project_configs": [
+                    {
+                        "supabase_url": "https://abc.supabase.co",
+                        "project_id": "abc",
+                        "key_type": "sb_publishable",
+                    }
+                ],
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            inventory = Path(temp_dir) / "inventory.jsonl"
+            status_file = Path(temp_dir) / "discovery-status.json"
+            with (
+                patch(
+                    "discovery.discover_targets",
+                    AsyncMock(return_value={target.url: target}),
+                ),
+                patch(
+                    "discovery.wayback_source.enrich_targets",
+                    AsyncMock(return_value=historical),
+                ),
+                patch("discovery._scan_batch", AsyncMock()) as scan_batch,
+                patch("discovery.DISCOVERY_STATUS_FILE", status_file),
+            ):
+                await run_discovery_scan(
+                    ["urlscan"],
+                    max_per_source=1,
+                    batch_size=1,
+                    findings_output=Path(temp_dir) / "findings.jsonl",
+                    inventory_output=inventory,
+                    active_scan=False,
+                    wayback_enrich=True,
+                )
+
+            record = json.loads(inventory.read_text())
+            status = json.loads(status_file.read_text())
+
+        scan_batch.assert_not_awaited()
+        self.assertIn("wayback", record["sources"])
+        self.assertTrue(record["source_metadata"]["wayback"][0]["historical_only"])
+        self.assertEqual(status["providers"]["wayback"]["checked"], 1)
+        self.assertEqual(status["scanned"], 0)
+
     async def test_discovery_only_fails_when_every_provider_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             status_file = Path(temp_dir) / "discovery-status.json"

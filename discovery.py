@@ -16,6 +16,7 @@ import shodan
 import builtwith_source
 import commoncrawl_source
 import urlscan_source
+import wayback_source
 from finding_records import append_jsonl, serialize_evidence
 from masking import EvidenceConfig
 from observability import (
@@ -321,6 +322,9 @@ async def run_discovery_scan(
     findings_output: Path | None = None,
     inventory_output: Path | None = None,
     active_scan: bool = True,
+    wayback_enrich: bool = False,
+    wayback_max_targets: int = wayback_source.MAX_ENRICHMENT_TARGETS,
+    wayback_max_assets: int = wayback_source.MAX_ARCHIVED_ASSETS,
 ) -> tuple[Path, Path]:
     if max_per_source < 1:
         raise ValueError("max_per_source must be at least 1")
@@ -348,6 +352,30 @@ async def run_discovery_scan(
     try:
         targets = await discover_targets(sources, max_per_source, state.providers)
         target_list = list(targets.values())
+        if wayback_enrich and target_list:
+            historical = await wayback_source.enrich_targets(
+                [target.url for target in target_list],
+                max_targets=wayback_max_targets,
+                max_assets=wayback_max_assets,
+            )
+            archived = 0
+            errors = 0
+            for target in target_list:
+                metadata = historical.get(target.url)
+                if not metadata:
+                    continue
+                target.metadata["wayback"].append(metadata)
+                if metadata.get("status") == "archived":
+                    target.sources.add("wayback")
+                    archived += 1
+                elif metadata.get("status") == "error":
+                    errors += 1
+            state.providers["wayback"] = {
+                "status": "error" if errors else "ok",
+                "candidates": archived,
+                "checked": len(historical),
+                "errors": errors,
+            }
         state.candidates = len(target_list)
         logger.info(
             "Discovery candidates collected",
@@ -458,6 +486,23 @@ if __name__ == "__main__":
         action="store_true",
         help="Collect and de-duplicate passive candidates without probing targets",
     )
+    parser.add_argument(
+        "--wayback-enrich",
+        action="store_true",
+        help="Inspect bounded archived copies of discovered candidates",
+    )
+    parser.add_argument(
+        "--wayback-max-targets",
+        type=int,
+        default=wayback_source.MAX_ENRICHMENT_TARGETS,
+        help="Maximum candidates to enrich from the Wayback Machine",
+    )
+    parser.add_argument(
+        "--wayback-max-assets",
+        type=int,
+        default=wayback_source.MAX_ARCHIVED_ASSETS,
+        help="Maximum archived JavaScript assets to inspect per candidate",
+    )
     args = parser.parse_args()
     srcs = [s.strip() for s in args.sources.split(",") if s.strip()]
     asyncio.run(
@@ -468,5 +513,8 @@ if __name__ == "__main__":
             args.output,
             args.inventory_output,
             active_scan=not args.discover_only,
+            wayback_enrich=args.wayback_enrich,
+            wayback_max_targets=args.wayback_max_targets,
+            wayback_max_assets=args.wayback_max_assets,
         )
     )

@@ -16,6 +16,9 @@ DISCOVERY_SOURCES="${DISCOVERY_SOURCES:-shodan,commoncrawl,builtwith,urlscan}"
 MAX_PER_SOURCE="${MAX_PER_SOURCE:-20000}"
 SCAN_BATCH_SIZE="${SCAN_BATCH_SIZE:-20}"
 DISCOVERY_ONLY="${DISCOVERY_ONLY:-false}"
+WAYBACK_ENRICH="${WAYBACK_ENRICH:-false}"
+WAYBACK_MAX_TARGETS="${WAYBACK_MAX_TARGETS:-25}"
+WAYBACK_MAX_ASSETS="${WAYBACK_MAX_ASSETS:-5}"
 
 mkdir -p "$TARGETS_DIR"
 
@@ -80,6 +83,13 @@ DISCOVERY_ARGS=(
 )
 if [[ "$DISCOVERY_ONLY" =~ ^(1|true|yes|on)$ ]]; then
   DISCOVERY_ARGS+=(--discover-only)
+fi
+if [[ "$WAYBACK_ENRICH" =~ ^(1|true|yes|on)$ ]]; then
+  DISCOVERY_ARGS+=(
+    --wayback-enrich
+    --wayback-max-targets "$WAYBACK_MAX_TARGETS"
+    --wayback-max-assets "$WAYBACK_MAX_ASSETS"
+  )
 fi
 if ! "$PYTHON_BIN" "$SCANNER_DIR/discovery.py" \
   "${DISCOVERY_ARGS[@]}" \

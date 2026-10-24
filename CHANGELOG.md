@@ -11,6 +11,9 @@ entries are grouped by date.
 - Passive URLScan discovery using existing public scans, with optional API-key
   authentication, pagination, retry/backoff, deduplication, and route-based
   Supabase signals. The adapter never submits or requests discovered targets.
+- Opt-in Wayback Machine enrichment for already discovered candidates. It
+  inspects bounded archived HTML and JavaScript, labels every result as
+  historical-only, and persists no reusable keys or archived response bodies.
 
 ## 2026-10-24 — Fingerprinting, evidence, and reliability overhaul
 
