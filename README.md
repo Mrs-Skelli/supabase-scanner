@@ -3,7 +3,7 @@
 A security research tool that detects Supabase clients and identifies tables
 that return rows to an anonymous or explicitly supplied authenticated session.
 
-Built for responsible disclosure — find it, report it, get it fixed.
+Built for responsible disclosur. Find it, report it, get it fixed.
 
 [Changelog](CHANGELOG.md) · [Security policy](SECURITY.md) ·
 [Contributing](CONTRIBUTING.md)
