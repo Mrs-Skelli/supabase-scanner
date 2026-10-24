@@ -122,7 +122,7 @@ function renderDetail(){
   const tables = current.vulnerable_tables||[];
   if(tab>=tables.length) tab=0;
   const t = tables[tab];
-  const creds = (current.credentials||[]).map(c=>`<div class="c">↳ ${esc(c.supabase_url||c.project_id||"")} · key ${esc(c.anon_key||"")}</div>`).join("");
+  const creds = (current.credentials||[]).map(c=>`<div class="c">↳ ${esc(c.supabase_url||c.project_id||"")} · key ${esc(c.anon_key_preview||c.anon_key||"")}</div>`).join("");
   el.innerHTML = `
     <div class="navbtns">
       <button onclick="move(-1)">↑ prev</button>

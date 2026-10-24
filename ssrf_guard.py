@@ -4,8 +4,11 @@ SSRF Guard - OWASP-aligned URL validation for server-side fetches.
 Implements:
   - Application layer: scheme allowlist, DNS resolution + IP blocklist,
     hostname blocklist, redirect validation with per-hop checking
-  - DNS pinning: resolve-then-connect to prevent TOCTOU rebinding
   - Redirect cap: max 5 hops, each validated
+
+The guard validates each hostname before httpx connects. It does not pin the
+validated address to the connection, so deployments should also enforce
+network-level egress controls to close DNS rebinding races.
 
 References:
   https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
@@ -25,43 +28,45 @@ logger = logging.getLogger(__name__)
 # multicast, reserved, IPv6 equivalents, IPv4-mapped IPv6
 _BLOCKED_NETS = [
     # IPv4
-    ipaddress.ip_network("0.0.0.0/8"),          # "This" network
-    ipaddress.ip_network("10.0.0.0/8"),          # RFC1918
-    ipaddress.ip_network("100.64.0.0/10"),       # CGNAT (Tailscale etc.)
-    ipaddress.ip_network("127.0.0.0/8"),         # Loopback
-    ipaddress.ip_network("169.254.0.0/16"),      # Link-local / cloud metadata
-    ipaddress.ip_network("172.16.0.0/12"),       # RFC1918
-    ipaddress.ip_network("192.0.0.0/24"),        # IETF protocol assignments
-    ipaddress.ip_network("192.0.2.0/24"),        # TEST-NET-1
-    ipaddress.ip_network("192.88.99.0/24"),      # 6to4 relay anycast
-    ipaddress.ip_network("192.168.0.0/16"),      # RFC1918
-    ipaddress.ip_network("198.18.0.0/15"),       # Benchmarking
-    ipaddress.ip_network("198.51.100.0/24"),     # TEST-NET-2
-    ipaddress.ip_network("203.0.113.0/24"),      # TEST-NET-3
-    ipaddress.ip_network("224.0.0.0/4"),         # Multicast
-    ipaddress.ip_network("240.0.0.0/4"),         # Reserved
+    ipaddress.ip_network("0.0.0.0/8"),  # "This" network
+    ipaddress.ip_network("10.0.0.0/8"),  # RFC1918
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT (Tailscale etc.)
+    ipaddress.ip_network("127.0.0.0/8"),  # Loopback
+    ipaddress.ip_network("169.254.0.0/16"),  # Link-local / cloud metadata
+    ipaddress.ip_network("172.16.0.0/12"),  # RFC1918
+    ipaddress.ip_network("192.0.0.0/24"),  # IETF protocol assignments
+    ipaddress.ip_network("192.0.2.0/24"),  # TEST-NET-1
+    ipaddress.ip_network("192.88.99.0/24"),  # 6to4 relay anycast
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC1918
+    ipaddress.ip_network("198.18.0.0/15"),  # Benchmarking
+    ipaddress.ip_network("198.51.100.0/24"),  # TEST-NET-2
+    ipaddress.ip_network("203.0.113.0/24"),  # TEST-NET-3
+    ipaddress.ip_network("224.0.0.0/4"),  # Multicast
+    ipaddress.ip_network("240.0.0.0/4"),  # Reserved
     ipaddress.ip_network("255.255.255.255/32"),  # Broadcast
     # IPv6
-    ipaddress.ip_network("::1/128"),             # Loopback
-    ipaddress.ip_network("::/128"),              # Unspecified
-    ipaddress.ip_network("fc00::/7"),            # Unique-local
-    ipaddress.ip_network("fe80::/10"),           # Link-local
-    ipaddress.ip_network("ff00::/8"),            # Multicast
+    ipaddress.ip_network("::1/128"),  # Loopback
+    ipaddress.ip_network("::/128"),  # Unspecified
+    ipaddress.ip_network("fc00::/7"),  # Unique-local
+    ipaddress.ip_network("fe80::/10"),  # Link-local
+    ipaddress.ip_network("ff00::/8"),  # Multicast
     # IPv4-mapped IPv6 (prevents ::ffff:127.0.0.1 bypass)
     ipaddress.ip_network("::ffff:0.0.0.0/96"),
 ]
 
 # -- Blocked hostnames (OWASP: known internal/metadata aliases) ----------------
-_BLOCKED_HOSTNAMES = frozenset({
-    "localhost",
-    "ip6-localhost",
-    "ip6-loopback",
-    "metadata.google.internal",
-    "metadata.internal",
-    "instance-data",
-    "kubernetes.default",
-    "kubernetes.default.svc",
-})
+_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "ip6-localhost",
+        "ip6-loopback",
+        "metadata.google.internal",
+        "metadata.internal",
+        "instance-data",
+        "kubernetes.default",
+        "kubernetes.default.svc",
+    }
+)
 
 # -- Allowed schemes (OWASP: disable unused URL schemas) -----------------------
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
@@ -85,13 +90,15 @@ def _is_private_ip(ip_str: str) -> bool:
     return any(addr in net for net in _BLOCKED_NETS)
 
 
-def resolve_and_validate(hostname: str, port: int | None = None) -> list[str] | str:
+def resolve_and_validate(
+    hostname: str, port: int | None = None
+) -> list[str] | str | None:
     """
     Resolve hostname via DNS, validate all returned IPs.
 
     Returns list of safe IPs on success, or error string on failure.
-    This is the DNS-pinning step: callers should connect to these IPs
-    directly (with Host header) to prevent TOCTOU rebinding attacks.
+    Callers still connect by hostname, so this validation must be paired with
+    network-level egress controls in hostile multi-tenant deployments.
     """
     try:
         results = socket.getaddrinfo(
@@ -111,12 +118,13 @@ def resolve_and_validate(hostname: str, port: int | None = None) -> list[str] | 
     if not results:
         return None  # no results = can't reach anything = safe
 
-    safe_ips = []
+    safe_ips: list[str] = []
     for _family, _type, _proto, _canon, sockaddr in results:
         ip = sockaddr[0]
         if _is_private_ip(ip):
             return f"blocked: {hostname} resolves to private IP {ip}"
-        safe_ips.append(ip)
+        if ip not in safe_ips:
+            safe_ips.append(ip)
 
     return safe_ips
 
@@ -135,7 +143,7 @@ def validate_url(url: str) -> str | None:
     """
     try:
         parsed = urlparse(url)
-    except Exception:
+    except ValueError:
         return "invalid URL"
 
     # 1. Scheme allowlist (OWASP: "Disable unused URL schemas")
@@ -152,7 +160,15 @@ def validate_url(url: str) -> str | None:
         return f"blocked hostname: {hostname}"
 
     # 3. DNS resolution + IP validation
-    result = resolve_and_validate(hostname, parsed.port)
+    if parsed.username or parsed.password:
+        return "embedded URL credentials are not allowed"
+
+    try:
+        port = parsed.port
+    except ValueError:
+        return "invalid port"
+
+    result = resolve_and_validate(hostname, port)
     if isinstance(result, str):
         return result
 

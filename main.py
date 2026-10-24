@@ -4,25 +4,27 @@ Mounted under /supabase via Apache reverse proxy.
 """
 
 import asyncio
+import base64
+import binascii
 import copy
-import glob
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
-from masking import prepare_sample_data
-
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from masking import EvidenceConfig, credential_preview, prepare_sample_data
 from scanner import ScanResult, scan
 
 logging.basicConfig(
@@ -32,6 +34,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
+BASE_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = Path(os.getenv("RESULTS_DIR", BASE_DIR / "results"))
 
 
 @asynccontextmanager
@@ -59,40 +63,59 @@ app.add_middleware(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+
+def _clean_token(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip().replace("\n", "").replace("\r", "")
+    if cleaned.lower().startswith("bearer "):
+        cleaned = cleaned[7:].strip()
+    return cleaned or None
+
+
+def _target_for_log(value: str) -> str:
+    try:
+        return urlparse(value).hostname or "[invalid-host]"
+    except ValueError:
+        return "[invalid-host]"
+
+
+def _decode_auth_blob(value: str) -> tuple[str | None, str | None]:
+    """Decode a Supabase auth-cookie blob without retaining cross-request state."""
+    has_cookie_prefix = value.startswith("base64-")
+    encoded = value.removeprefix("base64-")
+    if not has_cookie_prefix and (encoded.startswith("eyJ") or len(encoded) <= 200):
+        return value, None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded))
+    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return value, None
+    if not isinstance(decoded, dict):
+        return value, None
+    return _clean_token(decoded.get("access_token")), _clean_token(
+        decoded.get("refresh_token")
+    )
 
 
 class ScanRequest(BaseModel):
-    _pending_refresh_token: str | None = None  # class-level temp storage
-    auth_token: str | None = None  # Optional JWT for authenticated RLS testing
-    refresh_token: str | None = None  # Auto-extracted from cookie blobs
+    auth_token: str | None = None
+    refresh_token: str | None = None
+    raw_evidence: bool = False
     url: str
 
-    @field_validator("auth_token", mode="before")
-    @classmethod
-    def clean_auth_token(cls, v):
-        if v is None or v == "":
-            return None
-        v = v.strip().replace("\n", "").replace("\r", "")
-        if v.lower().startswith("bearer "):
-            v = v[7:]
-        v = v.strip()
-        # Strip "base64-" prefix from Supabase cookie format
-        if v.startswith("base64-"):
-            v = v[7:]
-        # If it looks like a base64 blob (not a JWT), try to extract access_token
-        if v and not v.startswith("eyJ") and len(v) > 200:
-            import base64, json
-            try:
-                decoded = json.loads(base64.b64decode(v + "=="))
-                if "access_token" in decoded:
-                    # Store refresh_token for later use via _cookie_refresh_token class var
-                    if "refresh_token" in decoded:
-                        cls._pending_refresh_token = decoded["refresh_token"]
-                    v = decoded["access_token"]
-            except Exception:
-                pass
-        return v.strip() or None
+    @model_validator(mode="after")
+    def normalize_auth(self) -> "ScanRequest":
+        token = _clean_token(self.auth_token)
+        refresh = _clean_token(self.refresh_token)
+        if token:
+            token, embedded_refresh = _decode_auth_blob(token)
+            refresh = refresh or embedded_refresh
+        self.auth_token = token
+        self.refresh_token = refresh
+        return self
 
     @field_validator("url")
     @classmethod
@@ -116,7 +139,7 @@ class TableResponse(BaseModel):
     sample_columns: list[str]
     rls_likely_disabled: bool
     error: str | None
-    sample_data: list[dict] = []
+    sample_data: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ScanResponse(BaseModel):
@@ -127,20 +150,23 @@ class ScanResponse(BaseModel):
     tables_checked: list[TableResponse]
     vulnerable_table_count: int
     auth_mode: str
+    evidence_mode: str
     error: str | None
 
 
-def _serialize_result(result: ScanResult) -> ScanResponse:
+def _serialize_result(result: ScanResult, raw_requested: bool = False) -> ScanResponse:
+    evidence = EvidenceConfig.from_environment()
+    show_raw = raw_requested and evidence.raw_values
     creds = []
     for c in result.credentials:
-        key = c.anon_key
-        preview = key[:20] + "..." + key[-10:] if len(key) > 32 else key
-        creds.append(CredentialResponse(
-            supabase_url=c.supabase_url,
-            project_id=c.project_id,
-            anon_key_preview=preview,
-            source_file=c.source_file,
-        ))
+        creds.append(
+            CredentialResponse(
+                supabase_url=c.supabase_url,
+                project_id=c.project_id,
+                anon_key_preview=credential_preview(c.anon_key),
+                source_file=c.source_file,
+            )
+        )
 
     tables = [
         TableResponse(
@@ -149,7 +175,11 @@ def _serialize_result(result: ScanResult) -> ScanResponse:
             sample_columns=t.sample_columns,
             rls_likely_disabled=t.rls_likely_disabled,
             error=t.error,
-            sample_data=t.sample_data,
+            sample_data=prepare_sample_data(
+                t.sample_data,
+                raw_values=show_raw,
+                limit=evidence.sample_limit,
+            ),
         )
         for t in result.tables_checked
     ]
@@ -162,20 +192,19 @@ def _serialize_result(result: ScanResult) -> ScanResponse:
         tables_checked=tables,
         vulnerable_table_count=len(result.vulnerable_tables),
         auth_mode=result.auth_mode,
+        evidence_mode="raw" if show_raw else "masked",
         error=result.error,
     )
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    with open("static/index.html") as f:
-        return f.read()
+    return (BASE_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
 
 @app.get("/browse", response_class=HTMLResponse)
 async def browse():
-    with open("static/browse.html") as f:
-        return f.read()
+    return (BASE_DIR / "static" / "browse.html").read_text(encoding="utf-8")
 
 
 @app.post("/api/scan", response_model=ScanResponse)
@@ -185,18 +214,29 @@ async def api_scan(request: Request, body: ScanRequest):
     Scan a URL for exposed Supabase credentials and disabled RLS.
     Rate limited to 10 scans/minute per IP.
     """
-    logger.info("Scan requested for: %s (from %s)", body.url, get_remote_address(request))
+    logger.info(
+        "Scan requested for host %s (from %s)",
+        _target_for_log(body.url),
+        get_remote_address(request),
+    )
     try:
-        # Use refresh_token extracted from cookie blob if available
-        refresh = body.refresh_token or getattr(body, '_pending_refresh_token', None)
-        result = await asyncio.wait_for(scan(body.url, auth_token=body.auth_token, refresh_token=refresh), timeout=60)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Scan timed out after 60 seconds")
+        result = await asyncio.wait_for(
+            scan(
+                body.url,
+                auth_token=body.auth_token,
+                refresh_token=body.refresh_token,
+            ),
+            timeout=60,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504, detail="Scan timed out after 60 seconds"
+        ) from None
     except Exception as exc:
-        logger.exception("Scan error for %s", body.url)
-        raise HTTPException(status_code=500, detail="Internal scan error")
+        logger.exception("Scan error for host %s", _target_for_log(body.url))
+        raise HTTPException(status_code=500, detail="Internal scan error") from exc
 
-    return _serialize_result(result)
+    return _serialize_result(result, raw_requested=body.raw_evidence)
 
 
 @app.get("/api/health")
@@ -207,24 +247,7 @@ async def health():
 # ── Findings browser ────────────────────────────────────────────────────────
 # Read-only views over the cron-discovered findings. Masked evidence is always
 # the default. Bounded raw values are available only when explicitly enabled in
-# the deployment and requested by the authenticated analyst UI.
-
-RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "results"))
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _evidence_sample_limit() -> int:
-    try:
-        value = int(os.getenv("RAW_EVIDENCE_SAMPLE_LIMIT", "1"))
-    except ValueError:
-        value = 1
-    return max(1, min(value, 3))
+# the deployment and explicitly requested by the analyst UI.
 
 
 def _has_samples(rec: dict) -> bool:
@@ -236,24 +259,19 @@ def _has_samples(rec: dict) -> bool:
 
 def _record_for_view(rec: dict, raw_requested: bool) -> tuple[dict, str, bool]:
     """Return an isolated, bounded record for masked or analyst display."""
+    evidence = EvidenceConfig.from_environment()
     rendered = copy.deepcopy(rec)
     stored_raw = (
-        rec.get("sample_mode") == "raw_secrets_redacted"
-        or rec.get("masked") is False
+        rec.get("sample_mode") == "raw_secrets_redacted" or rec.get("masked") is False
     )
-    raw_available = (
-        _env_flag("RAW_EVIDENCE_ENABLED")
-        and stored_raw
-        and _has_samples(rec)
-    )
+    raw_available = evidence.raw_values and stored_raw and _has_samples(rec)
     show_raw = raw_requested and raw_available
-    limit = _evidence_sample_limit()
     for bucket in ("vulnerable_tables", "tables_checked"):
         for table in rendered.get(bucket, []) or []:
             table["sample_data"] = prepare_sample_data(
                 table.get("sample_data") or [],
                 raw_values=show_raw,
-                limit=limit,
+                limit=evidence.sample_limit,
             )
     rendered["masked"] = not show_raw
     rendered["sample_mode"] = "raw_secrets_redacted" if show_raw else "masked"
@@ -263,21 +281,34 @@ def _record_for_view(rec: dict, raw_requested: bool) -> tuple[dict, str, bool]:
 def _load_findings() -> list[dict]:
     """All vulnerable findings, de-duped by target (latest scan wins)."""
     latest: dict[str, dict] = {}
-    for path in glob.glob(str(RESULTS_DIR / "findings_*.jsonl")):
+    for path in RESULTS_DIR.glob("findings_*.jsonl"):
         try:
-            with open(path) as f:
-                for line in f:
+            with path.open(encoding="utf-8") as findings_file:
+                for line_number, line in enumerate(findings_file, start=1):
                     line = line.strip()
                     if not line:
                         continue
-                    rec = json.loads(line)
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Ignoring malformed JSONL record in %s at line %d",
+                            path,
+                            line_number,
+                        )
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
                     tgt = rec.get("target")
                     if not tgt:
                         continue
                     prev = latest.get(tgt)
-                    if not prev or rec.get("timestamp", "") >= prev.get("timestamp", ""):
+                    if not prev or rec.get("timestamp", "") >= prev.get(
+                        "timestamp", ""
+                    ):
                         latest[tgt] = rec
-        except (OSError, ValueError):
+        except OSError as exc:
+            logger.warning("Unable to read findings file %s: %s", path, exc)
             continue
     out = list(latest.values())
     out.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
@@ -304,12 +335,16 @@ async def list_findings(q: str | None = None, limit: int = 50, offset: int = 0):
     if q:
         ql = q.lower()
         findings = [
-            r for r in findings
+            r
+            for r in findings
             if ql in (r.get("target", "").lower())
-            or any(ql in (t.get("name", "").lower()) for t in r.get("vulnerable_tables", []))
+            or any(
+                ql in (t.get("name", "").lower())
+                for t in r.get("vulnerable_tables", [])
+            )
         ]
     total = len(findings)
-    page = findings[offset:offset + max(1, min(limit, 200))]
+    page = findings[offset : offset + max(1, min(limit, 200))]
     payload = {
         "total": total,
         "offset": offset,
@@ -327,9 +362,9 @@ async def finding_detail(target: str, raw: bool = False):
             rendered, evidence_mode, raw_available = _record_for_view(rec, raw)
             creds = []
             for c in rendered.get("credentials", []) or []:
-                key = c.get("anon_key", "") or ""
                 c = dict(c)
-                c["anon_key"] = (key[:16] + "…" + key[-6:]) if len(key) > 28 else key
+                if "anon_key" in c:
+                    c["anon_key_preview"] = credential_preview(c.pop("anon_key") or "")
                 creds.append(c)
             payload = {
                 "target": rendered.get("target"),
@@ -340,9 +375,12 @@ async def finding_detail(target: str, raw: bool = False):
                 "evidence_mode": evidence_mode,
                 "raw_available": raw_available,
             }
-            return JSONResponse(payload, headers={
-                "Cache-Control": "no-store, private",
-                "Pragma": "no-cache",
-                "Referrer-Policy": "no-referrer",
-            })
+            return JSONResponse(
+                payload,
+                headers={
+                    "Cache-Control": "no-store, private",
+                    "Pragma": "no-cache",
+                    "Referrer-Policy": "no-referrer",
+                },
+            )
     raise HTTPException(status_code=404, detail="target not found")

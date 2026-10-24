@@ -1,7 +1,10 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .env
 server.log
 results/
 *.bak
+.pytest_cache/
+.ruff_cache/

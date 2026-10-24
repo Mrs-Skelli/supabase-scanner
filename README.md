@@ -1,21 +1,31 @@
 # Supabase RLS Scanner
 
-A security research tool that scans websites for exposed Supabase credentials and identifies tables with Row-Level Security (RLS) disabled.
+A security research tool that detects Supabase clients and identifies tables
+that return rows to an anonymous or explicitly supplied authenticated session.
 
 Built for responsible disclosure — find it, report it, get it fixed.
+
+> [!IMPORTANT]
+> A readable table does **not** by itself prove that RLS is disabled or that the
+> data is unintentionally public. Supabase policies can deliberately grant
+> anonymous read access. Treat scanner output as a lead and review the bounded
+> sample and application context before assigning severity.
 
 ---
 
 ## What it does
 
-Many web apps built on Supabase embed their project URL and anon key directly in frontend JavaScript. While the anon key is technically public, it becomes a serious issue when RLS is not configured — anyone with the key can query every row in every table.
+Many web apps built on Supabase embed their project URL and public client key
+directly in frontend JavaScript. Public client keys are designed to be shipped
+to browsers; the security boundary is the database policy, not key secrecy.
 
 This tool automates finding that combination:
 
 1. Fetches the target page and all linked JavaScript files
-2. Extracts Supabase project URLs and anon keys using pattern matching
+2. Extracts hosted, custom-domain, and strongly paired self-hosted client
+   configuration, including legacy JWT and `sb_publishable_` public keys
 3. Queries the Supabase REST API to discover table names via the OpenAPI spec
-4. Probes each table with only the anon key — if rows come back, RLS is disabled
+4. Makes a bounded read request and records tables that return at least one row
 
 Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/posts/supabase-shenanigans/)
 
@@ -25,10 +35,12 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 
 - Web UI for one-off scans
 - REST API for programmatic use
-- Internet-scale scanning via Shodan
+- Discovery adapters for Shodan, Common Crawl, and BuiltWith
 - Rate limiting (10 scans/min per IP)
 - Docker + nginx config ready for self-hosting
 - Findings saved as JSONL for easy processing
+- `sb_secret_` values are recognized only to exclude them; they are never used,
+  returned by the API, or written to findings
 
 ---
 
@@ -43,7 +55,7 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 ### Local (Python)
 
 ```bash
-git clone https://github.com/youruser/supabase-scanner
+git clone https://github.com/Mrs-Skelli/supabase-scanner
 cd supabase-scanner
 
 python -m venv venv
@@ -113,12 +125,18 @@ one bounded raw row per exposed table. Credential-shaped fields and token
 values remain redacted. `RAW_EVIDENCE_SAMPLE_LIMIT` may be set from 1 to 3;
 values outside that range are clamped. The findings browser still starts in
 masked mode and requires an explicit per-session action to reveal raw samples.
+The one-off scan API likewise requires `"raw_evidence": true`; enabling the
+environment variable alone never changes its default response.
+
+Do not expose analyst mode on an unauthenticated public deployment. Stored
+evidence can contain personal or otherwise sensitive application data even
+after credentials are removed.
 
 ```json
 {
   "timestamp": "2026-04-16T10:00:00",
   "target": "https://example.com",
-  "credentials": [{ "supabase_url": "...", "project_id": "...", "anon_key": "..." }],
+  "credentials": [{ "supabase_url": "...", "project_id": "...", "anon_key_preview": "..." }],
   "vulnerable_tables": [{ "name": "users", "row_count": 5, "sample_columns": ["id", "email"] }]
 }
 ```
@@ -132,7 +150,7 @@ masked mode and requires an explicit per-session action to reveal raw samples.
 ```bash
 curl -X POST https://research.example.com/api/scan \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://target.com"}'
+  -d '{"url": "https://target.com", "raw_evidence": false}'
 ```
 
 **Response:**
@@ -144,8 +162,22 @@ curl -X POST https://research.example.com/api/scan \
   "credentials": [...],
   "tables_checked": [...],
   "vulnerable_table_count": 2,
+  "evidence_mode": "masked",
   "error": null
 }
+```
+
+## Development
+
+The supported runtime is Python 3.12.
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+ruff format --check .
+ruff check .
+pytest
 ```
 
 ---

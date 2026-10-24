@@ -5,16 +5,15 @@ each discovered target through the core scanner.
 """
 
 import asyncio
-import csv
 import json
 import logging
 import os
-from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import shodan
 
+from masking import EvidenceConfig, credential_preview, prepare_sample_data
 from scanner import ScanResult, scan
 
 logger = logging.getLogger(__name__)
@@ -22,10 +21,10 @@ logger = logging.getLogger(__name__)
 # Shodan search query that finds pages referencing Supabase
 # Multiple queries for maximum Supabase coverage
 SHODAN_QUERIES = [
-    'ssl.cert.subject.cn:"*.supabase.co"',       # Hosted Supabase (highest yield)
-    'ssl.cert.subject.cn:"*.supabase.in"',        # Alternative Supabase domain
-    'http.html:"supabase.co"',                    # Frontend JS references
-    'http.component:"PostgREST"',                 # Self-hosted PostgREST
+    'ssl.cert.subject.cn:"*.supabase.co"',  # Hosted Supabase (highest yield)
+    'ssl.cert.subject.cn:"*.supabase.in"',  # Alternative Supabase domain
+    'http.html:"supabase.co"',  # Frontend JS references
+    'http.component:"PostgREST"',  # Self-hosted PostgREST
 ]
 SHODAN_QUERY = SHODAN_QUERIES[0]  # Default for CLI --query
 
@@ -90,16 +89,19 @@ async def _scan_batch(urls: list[str]) -> list[ScanResult]:
     return await asyncio.gather(*tasks, return_exceptions=False)
 
 
-def _save_finding(result: ScanResult, output_file: Path):
+def _save_finding(result: ScanResult, output_file: Path) -> None:
     """Append a vulnerable finding to the JSONL output file."""
+    evidence = EvidenceConfig.from_environment()
     record = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "target": result.target_url,
+        "masked": not evidence.raw_values,
+        "sample_mode": ("raw_secrets_redacted" if evidence.raw_values else "masked"),
         "credentials": [
             {
                 "supabase_url": c.supabase_url,
                 "project_id": c.project_id,
-                "anon_key": c.anon_key,
+                "anon_key_preview": credential_preview(c.anon_key),
                 "source_file": c.source_file,
             }
             for c in result.credentials
@@ -109,12 +111,18 @@ def _save_finding(result: ScanResult, output_file: Path):
                 "name": t.name,
                 "row_count": t.row_count,
                 "sample_columns": t.sample_columns,
+                "sample_data": prepare_sample_data(
+                    t.sample_data,
+                    raw_values=evidence.raw_values,
+                    limit=evidence.sample_limit,
+                ),
             }
             for t in result.vulnerable_tables
         ],
     }
-    with output_file.open("a") as f:
-        f.write(json.dumps(record) + "\n")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with output_file.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 async def run_shodan_scan(
@@ -132,9 +140,14 @@ async def run_shodan_scan(
         batch_size:  Concurrent scans per batch
         output_path: JSONL file to write findings to
     """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
     RESULTS_DIR.mkdir(exist_ok=True)
     if output_path is None:
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         output_path = RESULTS_DIR / f"findings_{ts}.jsonl"
 
     api = _shodan_client()
@@ -143,7 +156,11 @@ async def run_shodan_scan(
     try:
         info = api.count(query)
         total = min(info["total"], max_results)
-        logger.info("Shodan reports %d results for query (scanning up to %d)", info["total"], total)
+        logger.info(
+            "Shodan reports %d results for query (scanning up to %d)",
+            info["total"],
+            total,
+        )
     except shodan.APIError as exc:
         logger.error("Shodan count failed: %s", exc)
         return
@@ -158,10 +175,12 @@ async def run_shodan_scan(
                 if url not in seen:
                     seen.add(url)
                     all_urls.append(url)
-        except Exception as exc:
+        except shodan.APIError as exc:
             logger.warning("Query failed '%s': %s", q, exc)
     urls = all_urls[:max_results]
-    logger.info("Collected %d unique URLs from %d Shodan queries", len(urls), len(queries))
+    logger.info(
+        "Collected %d unique URLs from %d Shodan queries", len(urls), len(queries)
+    )
 
     scanned = 0
     found_creds = 0
@@ -175,19 +194,28 @@ async def run_shodan_scan(
             scanned += 1
             if result.found_credentials:
                 found_creds += 1
-                logger.info("[CREDS] %s — project: %s",
-                            result.target_url,
-                            result.credentials[0].project_id)
+                logger.info(
+                    "[CREDS] %s — project: %s",
+                    result.target_url,
+                    result.credentials[0].project_id,
+                )
             if result.vulnerable_tables:
                 found_vuln += 1
-                logger.warning("[VULN] %s — %d tables exposed: %s",
-                               result.target_url,
-                               len(result.vulnerable_tables),
-                               [t.name for t in result.vulnerable_tables])
+                logger.warning(
+                    "[VULN] %s — %d tables exposed: %s",
+                    result.target_url,
+                    len(result.vulnerable_tables),
+                    [t.name for t in result.vulnerable_tables],
+                )
                 _save_finding(result, output_path)
 
-        logger.info("Progress: %d/%d scanned | %d with creds | %d vulnerable",
-                    scanned, len(urls), found_creds, found_vuln)
+        logger.info(
+            "Progress: %d/%d scanned | %d with creds | %d vulnerable",
+            scanned,
+            len(urls),
+            found_creds,
+            found_vuln,
+        )
 
     logger.info("Scan complete. Findings saved to %s", output_path)
     return output_path
@@ -204,13 +232,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Shodan-powered Supabase RLS scanner")
     parser.add_argument("--query", default=SHODAN_QUERY, help="Shodan search query")
     parser.add_argument("--max", type=int, default=1000, help="Max results to process")
-    parser.add_argument("--batch", type=int, default=10, help="Concurrent scans per batch")
+    parser.add_argument(
+        "--batch", type=int, default=10, help="Concurrent scans per batch"
+    )
     parser.add_argument("--output", type=Path, help="Output JSONL file path")
     args = parser.parse_args()
 
-    asyncio.run(run_shodan_scan(
-        query=args.query,
-        max_results=args.max,
-        batch_size=args.batch,
-        output_path=args.output,
-    ))
+    asyncio.run(
+        run_shodan_scan(
+            query=args.query,
+            max_results=args.max,
+            batch_size=args.batch,
+            output_path=args.output,
+        )
+    )
