@@ -15,6 +15,7 @@ import shodan
 
 import builtwith_source
 import commoncrawl_source
+import urlscan_source
 from finding_records import append_jsonl, serialize_evidence
 from masking import EvidenceConfig
 from observability import (
@@ -39,7 +40,7 @@ from shodan_scanner import (
 
 logger = logging.getLogger(__name__)
 DISCOVERY_STATUS_FILE = RESULTS_DIR / "diagnostics" / "discovery-status.json"
-SUPPORTED_SOURCES = frozenset({"shodan", "commoncrawl", "builtwith"})
+SUPPORTED_SOURCES = frozenset({"shodan", "commoncrawl", "builtwith", "urlscan"})
 
 
 class ShodanDiscoveryUnavailable(RuntimeError):
@@ -298,6 +299,13 @@ async def discover_targets(
                 builtwith_source.discover_targets(max_results=max_per_source),
             )
         )
+    if "urlscan" in sources:
+        jobs.append(
+            add_source(
+                "URLScan",
+                urlscan_source.discover_targets(max_results=max_per_source),
+            )
+        )
     await asyncio.gather(*jobs)
     return merged
 
@@ -427,7 +435,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unified Supabase discovery runner")
     parser.add_argument(
         "--sources",
-        default="shodan,commoncrawl,builtwith",
+        default="shodan,commoncrawl,builtwith,urlscan",
         help="Comma-separated sources to run",
     )
     parser.add_argument(

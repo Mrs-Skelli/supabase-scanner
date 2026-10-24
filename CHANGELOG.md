@@ -6,7 +6,11 @@ entries are grouped by date.
 
 ## Unreleased
 
-No unreleased changes yet.
+### Added
+
+- Passive URLScan discovery using existing public scans, with optional API-key
+  authentication, pagination, retry/backoff, deduplication, and route-based
+  Supabase signals. The adapter never submits or requests discovered targets.
 
 ## 2026-10-24 — Fingerprinting, evidence, and reliability overhaul
 

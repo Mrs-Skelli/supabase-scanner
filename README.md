@@ -38,7 +38,7 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 
 - Web UI for one-off scans
 - REST API for programmatic use
-- Discovery adapters for Shodan, Common Crawl, and BuiltWith
+- Discovery adapters for Shodan, Common Crawl, BuiltWith, and URLScan
 - Passive discovery-only mode with provider pagination, retry/backoff, and
   de-duplicated, confidence-ranked candidate inventories
 - Modern environment-name, Realtime, Storage, Auth/JWKS, custom-domain, and
@@ -129,6 +129,10 @@ python shodan_scanner.py --query 'http.html:"supabase.co" http.html:"eyJhbGciOiJ
 # Collect passive candidates without sending requests to discovered targets
 python discovery.py --discover-only --max-per-source 20000
 ```
+
+URLScan searches existing public scans and works with a small unauthenticated
+quota. Set `URLSCAN_API_KEY` for the account's larger search quota. The adapter
+does not submit URLs to URLScan and never requests discovered targets.
 
 `shodan_cron.sh` uses paths relative to the repository and safely parses simple
 `KEY=VALUE` entries from `.env` without executing the file. Its interpreter,
