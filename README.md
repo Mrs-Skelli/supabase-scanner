@@ -107,6 +107,13 @@ python shodan_scanner.py --query 'http.html:"supabase.co" http.html:"eyJhbGciOiJ
 
 Findings are saved as JSONL in `results/` — one JSON object per vulnerable target.
 
+Sample values are masked by default. For an access-controlled analyst
+deployment, set `RAW_EVIDENCE_ENABLED=true` to retain and display a maximum of
+one bounded raw row per exposed table. Credential-shaped fields and token
+values remain redacted. `RAW_EVIDENCE_SAMPLE_LIMIT` may be set from 1 to 3;
+values outside that range are clamped. The findings browser still starts in
+masked mode and requires an explicit per-session action to reveal raw samples.
+
 ```json
 {
   "timestamp": "2026-04-16T10:00:00",

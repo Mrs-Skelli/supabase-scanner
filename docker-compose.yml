@@ -6,6 +6,8 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       - SHODAN_API_KEY=${SHODAN_API_KEY}
+      - RAW_EVIDENCE_ENABLED=${RAW_EVIDENCE_ENABLED:-false}
+      - RAW_EVIDENCE_SAMPLE_LIMIT=${RAW_EVIDENCE_SAMPLE_LIMIT:-1}
     volumes:
       - ./results:/app/results
     networks:

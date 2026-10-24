@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -11,10 +12,27 @@ from urllib.parse import urlparse
 
 from scanner import scan, ScanResult
 from shodan_scanner import RESULTS_DIR, SHODAN_QUERIES, _iter_shodan_targets, _shodan_client
+from masking import prepare_sample_data
 import builtwith_source
 import commoncrawl_source
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _evidence_config() -> tuple[bool, int]:
+    raw_values = _env_flag("RAW_EVIDENCE_ENABLED")
+    try:
+        limit = int(os.getenv("RAW_EVIDENCE_SAMPLE_LIMIT", "1"))
+    except ValueError:
+        limit = 1
+    return raw_values, max(1, min(limit, 3))
 
 
 @dataclass
@@ -34,6 +52,7 @@ def _normalize_url(url: str) -> str | None:
 
 
 def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, Any]:
+    raw_values, sample_limit = _evidence_config()
     status = 'vulnerable' if result.vulnerable_tables else 'clean'
     if result.error:
         status = 'error'
@@ -41,6 +60,8 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
         'timestamp': datetime.utcnow().isoformat(),
         'target': result.target_url,
         'status': status,
+        'masked': not raw_values,
+        'sample_mode': 'raw_secrets_redacted' if raw_values else 'masked',
         'auth_mode': result.auth_mode,
         'js_files_scanned': result.js_files_scanned,
         'error': result.error,
@@ -62,7 +83,9 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
                 'sample_columns': t.sample_columns,
                 'rls_likely_disabled': t.rls_likely_disabled,
                 'error': t.error,
-                'sample_data': t.sample_data,
+                'sample_data': prepare_sample_data(
+                    t.sample_data, raw_values=raw_values, limit=sample_limit
+                ),
             }
             for t in result.tables_checked
         ],
@@ -71,7 +94,9 @@ def _serialize_result(result: ScanResult, target: DiscoveryTarget) -> dict[str, 
                 'name': t.name,
                 'row_count': t.row_count,
                 'sample_columns': t.sample_columns,
-                'sample_data': t.sample_data,
+                'sample_data': prepare_sample_data(
+                    t.sample_data, raw_values=raw_values, limit=sample_limit
+                ),
             }
             for t in result.vulnerable_tables
         ],

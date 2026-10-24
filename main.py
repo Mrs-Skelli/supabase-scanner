@@ -4,9 +4,15 @@ Mounted under /supabase via Apache reverse proxy.
 """
 
 import asyncio
+import copy
+import glob
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+from masking import prepare_sample_data
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -166,6 +172,12 @@ async def index():
         return f.read()
 
 
+@app.get("/browse", response_class=HTMLResponse)
+async def browse():
+    with open("static/browse.html") as f:
+        return f.read()
+
+
 @app.post("/api/scan", response_model=ScanResponse)
 @limiter.limit("10/minute")
 async def api_scan(request: Request, body: ScanRequest):
@@ -190,3 +202,147 @@ async def api_scan(request: Request, body: ScanRequest):
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Findings browser ────────────────────────────────────────────────────────
+# Read-only views over the cron-discovered findings. Masked evidence is always
+# the default. Bounded raw values are available only when explicitly enabled in
+# the deployment and requested by the authenticated analyst UI.
+
+RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "results"))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _evidence_sample_limit() -> int:
+    try:
+        value = int(os.getenv("RAW_EVIDENCE_SAMPLE_LIMIT", "1"))
+    except ValueError:
+        value = 1
+    return max(1, min(value, 3))
+
+
+def _has_samples(rec: dict) -> bool:
+    return any(
+        bool(table.get("sample_data"))
+        for table in rec.get("vulnerable_tables", []) or []
+    )
+
+
+def _record_for_view(rec: dict, raw_requested: bool) -> tuple[dict, str, bool]:
+    """Return an isolated, bounded record for masked or analyst display."""
+    rendered = copy.deepcopy(rec)
+    stored_raw = (
+        rec.get("sample_mode") == "raw_secrets_redacted"
+        or rec.get("masked") is False
+    )
+    raw_available = (
+        _env_flag("RAW_EVIDENCE_ENABLED")
+        and stored_raw
+        and _has_samples(rec)
+    )
+    show_raw = raw_requested and raw_available
+    limit = _evidence_sample_limit()
+    for bucket in ("vulnerable_tables", "tables_checked"):
+        for table in rendered.get(bucket, []) or []:
+            table["sample_data"] = prepare_sample_data(
+                table.get("sample_data") or [],
+                raw_values=show_raw,
+                limit=limit,
+            )
+    rendered["masked"] = not show_raw
+    rendered["sample_mode"] = "raw_secrets_redacted" if show_raw else "masked"
+    return rendered, ("raw" if show_raw else "masked"), raw_available
+
+
+def _load_findings() -> list[dict]:
+    """All vulnerable findings, de-duped by target (latest scan wins)."""
+    latest: dict[str, dict] = {}
+    for path in glob.glob(str(RESULTS_DIR / "findings_*.jsonl")):
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    tgt = rec.get("target")
+                    if not tgt:
+                        continue
+                    prev = latest.get(tgt)
+                    if not prev or rec.get("timestamp", "") >= prev.get("timestamp", ""):
+                        latest[tgt] = rec
+        except (OSError, ValueError):
+            continue
+    out = list(latest.values())
+    out.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    return out
+
+
+def _summarize(rec: dict) -> dict:
+    vt = rec.get("vulnerable_tables", []) or []
+    return {
+        "target": rec.get("target"),
+        "timestamp": rec.get("timestamp"),
+        "sources": rec.get("sources", []),
+        "credential_count": len(rec.get("credentials", []) or []),
+        "vulnerable_table_count": len(vt),
+        "total_rows_exposed": sum((t.get("row_count") or 0) for t in vt),
+        "tables": [t.get("name") for t in vt],
+    }
+
+
+@app.get("/api/findings")
+async def list_findings(q: str | None = None, limit: int = 50, offset: int = 0):
+    """Paginated summaries of vulnerable targets. Optional substring filter `q`."""
+    findings = _load_findings()
+    if q:
+        ql = q.lower()
+        findings = [
+            r for r in findings
+            if ql in (r.get("target", "").lower())
+            or any(ql in (t.get("name", "").lower()) for t in r.get("vulnerable_tables", []))
+        ]
+    total = len(findings)
+    page = findings[offset:offset + max(1, min(limit, 200))]
+    payload = {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "results": [_summarize(r) for r in page],
+    }
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/findings/detail")
+async def finding_detail(target: str, raw: bool = False):
+    """Bounded detail for one target; raw application values require opt-in."""
+    for rec in _load_findings():
+        if rec.get("target") == target:
+            rendered, evidence_mode, raw_available = _record_for_view(rec, raw)
+            creds = []
+            for c in rendered.get("credentials", []) or []:
+                key = c.get("anon_key", "") or ""
+                c = dict(c)
+                c["anon_key"] = (key[:16] + "…" + key[-6:]) if len(key) > 28 else key
+                creds.append(c)
+            payload = {
+                "target": rendered.get("target"),
+                "timestamp": rendered.get("timestamp"),
+                "sources": rendered.get("sources", []),
+                "credentials": creds,
+                "vulnerable_tables": rendered.get("vulnerable_tables", []),
+                "evidence_mode": evidence_mode,
+                "raw_available": raw_available,
+            }
+            return JSONResponse(payload, headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
+            })
+    raise HTTPException(status_code=404, detail="target not found")

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000000">
+<title>Findings Browser — Supabase RLS Scanner</title>
+<style>
+:root{
+  --blue:#007acc;--bblue:#39a5ff;--dblue:#00477a;--black:#000;--dark:#111;
+  --gray:#333;--text:#c8e1ff;--red:#ff5f57;--yellow:#febc2e;--green:#28c840;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--black);color:var(--text);font-family:'Courier New',monospace;font-size:15px;line-height:1.5;letter-spacing:.3px}
+.wrap{max-width:1200px;margin:0 auto;padding:18px}
+.bar{display:flex;align-items:center;gap:14px;border-bottom:1px solid #333;padding-bottom:12px;margin-bottom:14px;flex-wrap:wrap}
+h1{color:var(--bblue);font-size:1.4em}
+.sub{color:var(--dblue);font-size:.8em}
+a.nav{color:var(--dblue);text-decoration:none;border:1px solid var(--dblue);padding:4px 10px;font-size:.8rem}
+a.nav:hover{color:var(--bblue);border-color:var(--bblue)}
+.mask-note{color:var(--yellow);font-size:.75rem;border:1px solid var(--yellow);padding:3px 8px}
+.mask-note.raw{color:var(--red);border-color:var(--red)}
+.evidence-toggle{background:var(--black);color:var(--yellow);border:1px solid var(--yellow);font-family:inherit;padding:4px 10px;cursor:pointer;font-size:.75rem}
+.evidence-toggle.raw{color:var(--red);border-color:var(--red)}
+.evidence-toggle:disabled{color:#555;border-color:#333;cursor:not-allowed}
+.layout{display:grid;grid-template-columns:340px 1fr;gap:16px}
+@media(max-width:820px){.layout{grid-template-columns:1fr}}
+input#q{width:100%;padding:8px 12px;border:1px solid var(--blue);background:var(--dark);color:var(--text);font-family:inherit;font-size:.95rem;outline:none;margin-bottom:10px}
+input#q:focus{border-color:var(--bblue);box-shadow:0 0 5px var(--dblue)}
+.list{border:1px solid #333;max-height:72vh;overflow-y:auto}
+.tgt{padding:9px 12px;border-bottom:1px solid #1c1c1c;cursor:pointer}
+.tgt:hover{background:#0c1420}
+.tgt.active{background:#0c2036;border-left:3px solid var(--bblue)}
+.tgt .host{color:var(--text);font-weight:bold;word-break:break-all;font-size:.9rem}
+.tgt .meta{color:var(--dblue);font-size:.72rem;margin-top:3px}
+.pill{display:inline-block;padding:1px 6px;font-size:.7rem;border:1px solid var(--dblue);color:var(--dblue);margin-right:4px}
+.pill.red{color:var(--red);border-color:var(--red)}
+.detail{border:1px solid #333;min-height:72vh;padding:16px;overflow:auto}
+.empty{color:var(--dblue);text-align:center;margin-top:20vh}
+.dhost{color:var(--bblue);font-size:1.1rem;font-weight:bold;word-break:break-all}
+.dmeta{color:var(--dblue);font-size:.78rem;margin:4px 0 12px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;border-bottom:1px solid #222;padding-bottom:8px}
+.tab{padding:5px 10px;border:1px solid var(--gray);color:var(--dblue);cursor:pointer;font-size:.82rem}
+.tab:hover{border-color:var(--bblue);color:var(--bblue)}
+.tab.active{border-color:var(--yellow);color:var(--yellow)}
+.tab .rc{opacity:.7;font-size:.72rem}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--gray);font-size:.86rem;vertical-align:top}
+th{color:var(--dblue);text-transform:uppercase;font-size:.74rem}
+.val{color:var(--text);word-break:break-word}
+.masked{color:var(--yellow)}
+.raw-value{color:var(--red)}
+.cols{color:var(--dblue);font-size:.8rem;margin:6px 0}
+.kv{color:var(--dblue)}.kv b{color:var(--text)}
+.hint{color:var(--dblue);font-size:.74rem;margin-top:14px}
+.navbtns{float:right;display:flex;gap:6px}
+.navbtns button{background:var(--black);color:var(--blue);border:1px solid var(--blue);font-family:inherit;padding:3px 9px;cursor:pointer;font-size:.8rem}
+.navbtns button:hover{background:var(--blue);color:var(--black)}
+.creds{margin:10px 0;padding:8px;border:1px dashed var(--dblue)}
+.creds .c{font-size:.8rem;color:var(--dblue);word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>▚ Findings Browser</h1>
+    <span class="sub">exposed Supabase instances · RLS disabled</span>
+    <span class="mask-note" id="evidenceNote">🔒 masked by default</span>
+    <button class="evidence-toggle" id="evidenceToggle" disabled>show raw sample</button>
+    <a class="nav" href="./">← scanner</a>
+  </div>
+  <div class="layout">
+    <div>
+      <input id="q" placeholder="filter by host or table…" autocomplete="off">
+      <div class="list" id="list"></div>
+    </div>
+    <div class="detail" id="detail"><div class="empty">select a target — or press ↑ ↓ to move, ← → for tables</div></div>
+  </div>
+</div>
+<script>
+const API = location.pathname.replace(/\/browse.*/, "");
+let findings = [], sel = -1, tab = 0, current = null, rawRequested = false;
+
+async function loadList(q=""){
+  const r = await fetch(`${API}/api/findings?limit=200`+(q?`&q=${encodeURIComponent(q)}`:""), {cache:"no-store"});
+  const d = await r.json();
+  findings = d.results || [];
+  renderList();
+  if(findings.length && sel<0){ selectTarget(0); }
+}
+
+function renderList(){
+  const el = document.getElementById("list");
+  if(!findings.length){ el.innerHTML='<div class="empty" style="margin-top:30px">no findings</div>'; return; }
+  el.innerHTML = findings.map((f,i)=>`
+    <div class="tgt ${i===sel?'active':''}" data-i="${i}">
+      <div class="host">${esc(f.target)}</div>
+      <div class="meta">
+        <span class="pill red">${f.vulnerable_table_count} tables</span>
+        <span class="pill">${(f.total_rows_exposed||0).toLocaleString()} rows</span>
+        <span class="pill">${(f.sources||[]).join(",")||"—"}</span>
+      </div>
+    </div>`).join("");
+  [...el.querySelectorAll(".tgt")].forEach(n=>n.onclick=()=>selectTarget(+n.dataset.i));
+}
+
+async function selectTarget(i){
+  sel=i; tab=0; renderList();
+  const f = findings[i];
+  const raw = rawRequested ? "&raw=true" : "";
+  const r = await fetch(`${API}/api/findings/detail?target=${encodeURIComponent(f.target)}${raw}`, {cache:"no-store"});
+  current = await r.json();
+  if(current.evidence_mode!=="raw") rawRequested=false;
+  updateEvidenceControls();
+  renderDetail();
+  const active = document.querySelector(".tgt.active"); if(active) active.scrollIntoView({block:"nearest"});
+}
+
+function renderDetail(){
+  if(!current){return;}
+  const el = document.getElementById("detail");
+  const tables = current.vulnerable_tables||[];
+  if(tab>=tables.length) tab=0;
+  const t = tables[tab];
+  const creds = (current.credentials||[]).map(c=>`<div class="c">↳ ${esc(c.supabase_url||c.project_id||"")} · key ${esc(c.anon_key||"")}</div>`).join("");
+  el.innerHTML = `
+    <div class="navbtns">
+      <button onclick="move(-1)">↑ prev</button>
+      <button onclick="move(1)">next ↓</button>
+    </div>
+    <div class="dhost">${esc(current.target)}</div>
+    <div class="dmeta">scanned ${esc((current.timestamp||"").replace('T',' ').slice(0,19))} UTC · ${tables.length} vulnerable tables · sources: ${(current.sources||[]).join(", ")||"—"}</div>
+    ${creds?`<div class="creds"><b class="kv">exposed credentials</b>${creds}</div>`:""}
+    <div class="tabs">${tables.map((tt,j)=>`<span class="tab ${j===tab?'active':''}" data-j="${j}">${esc(tt.name)} <span class="rc">${tt.row_count??'?'}</span></span>`).join("")}</div>
+    ${renderTable(t)}
+    <div class="hint">keys: ↑/↓ targets · ←/→ tables · ${current.evidence_mode==="raw"?'raw application values shown in <span class="raw-value">red</span>; secrets remain redacted':'masked values shown in <span class="masked">yellow</span>'}</div>`;
+  [...el.querySelectorAll(".tab")].forEach(n=>n.onclick=()=>{tab=+n.dataset.j;renderDetail();});
+}
+
+function renderTable(t){
+  if(!t) return '<div class="empty">no table</div>';
+  const cols = t.sample_columns||[];
+  const row = (t.sample_data&&t.sample_data[0])||null;
+  let body;
+  if(row){
+    const valueClass = current.evidence_mode==="raw" ? "raw-value" : "masked";
+    body = Object.keys(row).map(k=>`<tr><td class="kv">${esc(k)}</td><td class="val ${valueClass}">${esc(fmt(row[k]))}</td></tr>`).join("");
+  } else if(cols.length){
+    body = cols.map(c=>`<tr><td class="kv">${esc(c)}</td><td class="val" style="color:#555">— no sample stored —</td></tr>`).join("");
+  } else { body = '<tr><td colspan="2" style="color:#555">no columns captured</td></tr>'; }
+  return `
+    <div class="kv"><b>${esc(t.name)}</b> — row_count: <b>${t.row_count??'?'}</b>, RLS: <span style="color:var(--red)">likely disabled</span></div>
+    <div class="cols">columns: ${cols.map(esc).join(", ")||"—"}</div>
+    <table><thead><tr><th>column</th><th>${current.evidence_mode==="raw"?'raw sample value':'masked sample value'}</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function updateEvidenceControls(){
+  const button=document.getElementById("evidenceToggle");
+  const note=document.getElementById("evidenceNote");
+  const available=Boolean(current&&current.raw_available);
+  button.disabled=!available;
+  button.classList.toggle("raw", rawRequested);
+  button.textContent=available?(rawRequested?"hide raw sample":"show raw sample"):"raw sample unavailable";
+  note.classList.toggle("raw", rawRequested);
+  note.textContent=rawRequested?"⚠ raw analyst evidence — may contain PII; secrets redacted":"🔒 masked by default";
+}
+
+async function toggleRaw(){
+  if(!current?.raw_available) return;
+  rawRequested=!rawRequested;
+  await selectTarget(sel);
+}
+
+function move(d){ let n=sel+d; if(n>=0&&n<findings.length) selectTarget(n); }
+function fmt(v){ return v===null?"null":(typeof v==="object"?JSON.stringify(v):String(v)); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+document.getElementById("q").addEventListener("input", e=>{ sel=-1; loadList(e.target.value.trim()); });
+document.getElementById("evidenceToggle").addEventListener("click", toggleRaw);
+document.addEventListener("keydown", e=>{
+  if(document.activeElement.id==="q") return;
+  if(e.key==="ArrowDown"){e.preventDefault();move(1);}
+  else if(e.key==="ArrowUp"){e.preventDefault();move(-1);}
+  else if(e.key==="ArrowRight"){e.preventDefault();const n=(current?.vulnerable_tables||[]).length;if(n){tab=(tab+1)%n;renderDetail();}}
+  else if(e.key==="ArrowLeft"){e.preventDefault();const n=(current?.vulnerable_tables||[]).length;if(n){tab=(tab-1+n)%n;renderDetail();}}
+});
+loadList();
+</script>
+</body>
+</html>

@@ -6,6 +6,8 @@ source /root/supabase-scanner/.env
 export SHODAN_API_KEY
 export BUILTWITH_API_KEY
 export BUILTWITH_TECH
+export RAW_EVIDENCE_ENABLED
+export RAW_EVIDENCE_SAMPLE_LIMIT
 
 SCANNER_DIR="/root/supabase-scanner"
 RESULTS_DIR="$SCANNER_DIR/results"
