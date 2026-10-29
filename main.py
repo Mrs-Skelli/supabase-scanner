@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -48,6 +50,25 @@ RESULTS_DIR = Path(os.getenv("RESULTS_DIR", BASE_DIR / "results"))
 DISCOVERY_STATUS_FILE = RESULTS_DIR / "diagnostics" / "discovery-status.json"
 LOG_FILE = configure_logging("api", BASE_DIR)
 logger = logging.getLogger(__name__)
+analyst_auth = HTTPBasic(auto_error=False)
+
+
+async def require_analyst(request: Request) -> None:
+    """Protect analyst-only views even when a reverse proxy is misconfigured."""
+    username = os.getenv("ANALYST_USERNAME")
+    password = os.getenv("ANALYST_PASSWORD")
+    if not username or not password:
+        raise HTTPException(status_code=503, detail="Analyst access is not configured")
+    credentials: HTTPBasicCredentials | None = await analyst_auth(request)
+    if not credentials or not (
+        secrets.compare_digest(credentials.username, username)
+        and secrets.compare_digest(credentials.password, password)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Analyst authentication required",
+            headers={"WWW-Authenticate": "Basic"},
+        )
 
 
 @asynccontextmanager
@@ -114,12 +135,18 @@ async def request_observability(request: Request, call_next):
         reset_request(token)
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -277,7 +304,8 @@ async def browse():
 
 
 @app.get("/diagnostics", response_class=HTMLResponse)
-async def diagnostics_page():
+async def diagnostics_page(request: Request):
+    await require_analyst(request)
     return (BASE_DIR / "static" / "diagnostics.html").read_text(encoding="utf-8")
 
 
@@ -288,6 +316,8 @@ async def api_scan(request: Request, body: ScanRequest):
     Scan a URL for public Supabase client config and bounded access evidence.
     Rate limited to 10 scans/minute per IP.
     """
+    if body.auth_token or body.refresh_token or body.raw_evidence:
+        await require_analyst(request)
     operation_id = new_id("scan")
     operation_token = bind_operation(operation_id)
     started = time.perf_counter()
@@ -360,8 +390,9 @@ async def health():
 
 
 @app.get("/api/diagnostics")
-async def diagnostics():
+async def diagnostics(request: Request):
     """Derived operational state only; the reverse proxy protects this route."""
+    await require_analyst(request)
     evidence = EvidenceConfig.from_environment()
     payload = runtime_snapshot()
     payload.update(
@@ -445,8 +476,10 @@ async def list_findings(q: str | None = None, limit: int = 50, offset: int = 0):
 
 
 @app.get("/api/findings/detail")
-async def finding_detail(target: str, raw: bool = False):
+async def finding_detail(request: Request, target: str, raw: bool = False):
     """Bounded detail for one target; raw application values require opt-in."""
+    if raw:
+        await require_analyst(request)
     for rec in _load_findings():
         if rec.get("target") == target:
             rendered, evidence_mode, raw_available = _record_for_view(rec, raw)

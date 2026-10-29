@@ -21,8 +21,8 @@ URLSCAN_QUERIES = (
 URLSCAN_PAGE_SIZE = 1000
 URLSCAN_MAX_QUERY_RESULTS = 10000
 URLSCAN_MAX_PAGES = 20
-URLSCAN_USER_AGENT = (
-    "SupabaseResearchScanner/1.0 (responsible-disclosure; research.skelli.win)"
+URLSCAN_USER_AGENT = os.getenv(
+    "RESEARCH_USER_AGENT", "SupabaseResearchScanner/1.0 (responsible-disclosure)"
 )
 EXCLUDED_HOST_SUFFIXES = (
     "supabase.co",

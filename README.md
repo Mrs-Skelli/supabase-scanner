@@ -64,7 +64,22 @@ Read more about the underlying issue: [Supabase Shenanigans](https://skelli.win/
 
 ## Quickstart
 
-### Local (Python)
+### Command line (Python 3.12+)
+
+Install from the repository, then run one authorized check:
+
+```bash
+python3 -m pip install git+https://github.com/Mrs-Skelli/supabase-scanner.git
+supascan --help
+supascan https://your-site.example --authorized
+```
+
+The command prints masked JSON. It does not accept user sessions or reveal raw
+sample values. It makes active requests to the site and its discovered Supabase
+backend, so `--authorized` is required. A returned row is evidence of readable
+data in that access mode, not proof of an unintended leak.
+
+### Local web UI (Python 3.12+)
 
 ```bash
 git clone https://github.com/Mrs-Skelli/supabase-scanner
@@ -73,6 +88,9 @@ cd supabase-scanner
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+
+# Set ANALYST_USERNAME and ANALYST_PASSWORD in your environment before
+# using diagnostics, authenticated scans, or raw evidence.
 
 uvicorn main:app --reload
 # Open http://localhost:8000
@@ -99,7 +117,7 @@ Deploy to your own domain with TLS:
 sudo certbot certonly --nginx -d research.example.com
 
 # 2. Configure nginx
-sudo cp nginx.conf /etc/nginx/sites-available/supabase-scanner
+sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/supabase-scanner
 sudo ln -s /etc/nginx/sites-available/supabase-scanner /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 
@@ -185,6 +203,14 @@ environment variable alone never changes its default response.
 Do not expose analyst mode on an unauthenticated public deployment. Stored
 evidence can contain personal or otherwise sensitive application data even
 after credentials are removed.
+
+Set both `ANALYST_USERNAME` and a unique `ANALYST_PASSWORD` to use diagnostics,
+authenticated scans, or raw evidence. Those requests fail closed when either
+setting is absent. The public findings browser remains masked by default.
+Use TLS for remote access; HTTP Basic credentials must not travel over plain HTTP.
+The same-origin web UI needs no CORS setting. Set `CORS_ALLOWED_ORIGINS` to a
+comma-separated list of exact trusted origins only if a separate frontend needs
+the API.
 
 ```json
 {

@@ -7,6 +7,7 @@ historical metadata and non-reusable key fingerprints.
 
 import asyncio
 import logging
+import os
 import re
 from collections import Counter
 from urllib.parse import urlparse
@@ -26,8 +27,8 @@ from fingerprints import (
 logger = logging.getLogger(__name__)
 
 WAYBACK_AVAILABILITY_URL = "https://archive.org/wayback/available"
-WAYBACK_USER_AGENT = (
-    "SupabaseResearchScanner/1.0 (responsible-disclosure; research.skelli.win)"
+WAYBACK_USER_AGENT = os.getenv(
+    "RESEARCH_USER_AGENT", "SupabaseResearchScanner/1.0 (responsible-disclosure)"
 )
 MAX_ARCHIVE_BODY_BYTES = 5 * 1024 * 1024
 MAX_ARCHIVED_ASSETS = 5

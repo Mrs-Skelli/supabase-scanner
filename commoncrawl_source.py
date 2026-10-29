@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import math
+import os
 from urllib.parse import urlparse
 
 import httpx
@@ -34,8 +35,8 @@ COMMONCRAWL_BODY_MARKERS = (
     "/realtime/v1/websocket",
     "/socket/websocket",
 )
-COMMONCRAWL_USER_AGENT = (
-    "SupabaseResearchScanner/1.0 (responsible-disclosure; research.skelli.win)"
+COMMONCRAWL_USER_AGENT = os.getenv(
+    "RESEARCH_USER_AGENT", "SupabaseResearchScanner/1.0 (responsible-disclosure)"
 )
 MAX_INDEX_PAGE_RESULTS = 100
 MAX_INDEX_PAGES = 10
