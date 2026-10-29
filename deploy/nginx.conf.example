@@ -1,20 +1,19 @@
+limit_req_zone $binary_remote_addr zone=scanner:10m rate=20r/m;
+
 server {
     listen 80;
-    server_name research.skelli.win;
+    server_name research.example.com;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name research.skelli.win;
+    server_name research.example.com;
 
-    ssl_certificate     /etc/letsencrypt/live/research.skelli.win/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/research.skelli.win/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/research.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/research.example.com/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
-
-    # Rate limit at nginx level too
-    limit_req_zone $binary_remote_addr zone=scanner:10m rate=20r/m;
 
     location / {
         limit_req zone=scanner burst=5 nodelay;
